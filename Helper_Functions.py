@@ -219,6 +219,22 @@ def resize_2d_cwh(img, size=(256, 256)):
 
     return img.squeeze(0)
 #---------------------------------------------------------------------------
+def convert_to_NumPy(img):
+    if img is None:
+        raise ValueError("Image is None")
+
+    if isinstance(img, np.ndarray):
+        return img
+
+    return sitk.GetArrayFromImage(img)
+#---------------------------------------------------------------------------
+def normalizeTanh(x):
+    x_min = x.min()
+    x_max = x.max()
+    x = (x - x_min) / (x_max - x_min )  # [0,1]
+    x = x * 2.0 - 1.0                         # [-1,1]
+    return x
+#---------------------------------------------------------------------------
 def load_nii_files_fromDataset(niiDatasetRoot):
     samples = []
     for subject in os.listdir(niiDatasetRoot):
@@ -250,6 +266,8 @@ def load_nii_files_fromDataset(niiDatasetRoot):
             # 🔥 convert to numpy
             mri = sitk.GetArrayFromImage(mri).astype(np.float32)
             pet = sitk.GetArrayFromImage(pet).astype(np.float32)
+            mri = normalizeTanh(mri)
+            pet = normalizeTanh(pet)
         
             mri = torch.as_tensor(mri).unsqueeze(0).float()
             pet = torch.as_tensor(pet).unsqueeze(0).float()
