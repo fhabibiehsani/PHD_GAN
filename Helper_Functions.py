@@ -19,12 +19,11 @@ def Train_Test_Split_Dataset(dataset,percent):
 
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    
-
     print(f"Total samples: {dataset_size}")
     print(f"Train samples: {train_size}")
     print(f"Test  samples: {test_size}")
     return train_dataset, test_dataset
+#---------------------------------------------------------------------------
 def Train_Test_DataLoader(train_dataset, test_dataset,batch_size):
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -37,21 +36,19 @@ def Device():
     print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU")
     return device
 #---------------------------------------------------------------------------
+def Transform(W,H):
+    transform=transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Resize((W,H)),                 #Original image  512*512   ->    Resize to 128*128
+                transforms.Normalize((0.5,), (0.5,))      #Original image 0<pix<+1   ->   -1<pix<+1
+            ])
+    return transform
+#---------------------------------------------------------------------------
 def Calculate_min_max_Image(image, name):
-  
-    
     img_min = image.min()
     img_max = image.max()
     
     print(f"{name}:\t min={img_min:.3f}, max={img_max:.3f}")
-#---------------------------------------------------------------------------
-def Transform():
-    transform=transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Resize((128, 128)),            #Original image  512*512   ->    Resize to 128*128
-                transforms.Normalize((0.5,), (0.5,))      #Original image 0<pix<+1   ->   -1<pix<+1
-            ])
-    return transform
 #---------------------------------------------------------------------------
 def Show(generator,epoch, train_dataset,device):
     mri_img, real_pet_img = train_dataset[0]
@@ -112,7 +109,7 @@ def Show_Loss(losses_g,losses_d):
     plt.legend()
     plt.grid(True)
     plt.show()
-    #---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 def Plot_Sample_of_Dataset(train_dataset):
     # One Sample of Dataset
     sample = train_dataset[0]
@@ -131,14 +128,14 @@ def Plot_Sample_of_Dataset(train_dataset):
     mri_np = mri_img.squeeze()
     pet_np = pet_img.squeeze()
 
-    # رسم کنار هم
-    plt.figure(figsize=(10,5))  # اندازه تصویر کلی
-    plt.subplot(1, 2, 1)        # 1 ردیف، 2 ستون، تصویر اول
+    
+    plt.figure(figsize=(10,5)) 
+    plt.subplot(1, 2, 1)      
     plt.imshow(mri_np, cmap="gray")
     plt.title("MRI")
     plt.axis()
 
-    plt.subplot(1, 2, 2)        # تصویر دوم
+    plt.subplot(1, 2, 2)       
     plt.imshow(pet_np, cmap="gray")
     plt.title("PET")
     plt.axis()
@@ -219,7 +216,6 @@ def resize_2d_cwh(img, size=(256, 256)):
 
     return img.squeeze(0)
 #---------------------------------------------------------------------------
-def convert_to_NumPy(img):
     if img is None:
         raise ValueError("Image is None")
 
@@ -232,10 +228,10 @@ def normalizeTanh(x):
     x_min = x.min()
     x_max = x.max()
     x = (x - x_min) / (x_max - x_min )  # [0,1]
-    x = x * 2.0 - 1.0                         # [-1,1]
+    x = x * 2.0 - 1.0                   # [-1,1]
     return x
 #---------------------------------------------------------------------------
-def load_nii_files_fromDataset(niiDatasetRoot):
+def Load_nii_Files_From_Dataset(niiDatasetRoot):
     samples = []
     for subject in os.listdir(niiDatasetRoot):
        
@@ -277,3 +273,43 @@ def load_nii_files_fromDataset(niiDatasetRoot):
             samples.append((mri, pet))
 
     return samples
+#---------------------------------------------------------------------------
+def plot_triplet(mri, real_pet, fake_pet):
+
+    mri=Convert_to_numpy(mri)
+    real_pet=Convert_to_numpy(real_pet)
+    fake_pet=Convert_to_numpy(fake_pet)
+
+    if mri.ndim == 4:
+        mri = mri[0,0]
+    if real_pet.ndim == 4:
+        real_pet = real_pet[0,0]
+    if fake_pet.ndim == 4:
+        fake_pet = fake_pet[0,0]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15,5))
+
+    axes[0].imshow(mri, cmap='gray')
+    axes[0].set_title("MRI")
+    axes[0].axis("off")
+
+    axes[1].imshow(real_pet, cmap='gray')
+    axes[1].set_title("Real_PET")
+    axes[1].axis("off")
+
+    axes[2].imshow(fake_pet, cmap='gray')
+    axes[2].set_title("Fake_PET")
+    axes[2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+#---------------------------------------------------------------------------
+def Plot_Example(generator, test_loader, device):
+    generator.eval()
+
+    with torch.no_grad():
+        for mri,real_pet in test_loader:
+
+            real_pet = real_pet.to(device).float()
+            fake_pet = generator(real_pet)
+            plot_triplet(mri, real_pet, fake_pet) 
