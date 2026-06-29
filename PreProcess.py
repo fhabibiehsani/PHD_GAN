@@ -21,6 +21,8 @@ class DatasetExplorer():
             self.mri_root=os.path.join(self.root_folder, "mri.nii.gz")
             self.pet_root=os.path.join(self.root_folder, "pet.nii.gz")
             self.subject= self.root_folder
+        elif self.dim=="2D_skip":
+             self.subject= self.root_folder
     def FindPairFolders(self):
         subjects = self.GetSubjects()
 
@@ -73,8 +75,17 @@ class DatasetExplorer():
                         fmt = self.DetectFileExtension(mri_path)
                         if fmt:
                             mri_dict[mri_path] = fmt
-
-
+            elif self.dim=="2D_skip":
+                for subject in os.listdir(self.root_folder):
+                        mri_path = os.path.join(self.root_folder, subject,"mri.nii")
+                        pet_path = os.path.join(self.root_folder,subject,"pet.nii")
+                        
+                        fmt = self.DetectFileExtension(pet_path)
+                        if fmt:
+                            pet_dict[pet_path] = fmt
+                        fmt = self.DetectFileExtension(mri_path)
+                        if fmt:
+                            mri_dict[mri_path] = fmt
         return mri_dict,pet_dict
     def GetSubjects(self):
         subjects= os.listdir(self.subject)
@@ -199,6 +210,8 @@ class DatasetExplorer():
                 return ".i"
             elif self.IsFileExtension('.hdr', files):
                 return ".hdr"
+            elif self.IsFileExtension('.nii', files):
+                return ".nii"
 
         return None
     
@@ -248,9 +261,10 @@ class DatasetExplorer():
         return sitk.GetArrayFromImage(img)
 
 class DatasetBuilder():
-    def __init__(self,input_nii,output_2D_nii_Dataset):
+    def __init__(self,dataset,input_nii,output_2D_nii_Dataset):
         self.input_nii = input_nii
         self.output_2D_nii_Dataset = output_2D_nii_Dataset   
+        self.dataset=dataset
     def Create_dataset_nii(self,mri_np,pet_np,subject,count):
         affine = np.eye(4)
 
@@ -435,6 +449,15 @@ class DatasetBuilder():
                 pairCounter+=1
             totalPairImagesCount += 1
         print("Total Pair Images:",totalPairImagesCount) 
+    def CreateDataset2D(self):
+        for i,(mri2D, pet2D) in enumerate(self.dataset):
+                subject_out = os.path.join(self.output_2D_nii_Dataset, str(i+1))
+                os.makedirs(subject_out, exist_ok=True)
+                mri_img = sitk.GetImageFromArray(mri2D)
+                pet_img = sitk.GetImageFromArray(pet2D)
+                # ✔ save correctly
+                sitk.WriteImage(mri_img, os.path.join(subject_out, "mri.nii"))
+                sitk.WriteImage(pet_img, os.path.join(subject_out, "pet.nii"))
 
 class ImageLoader():
     def __init__(self,mri_dict, pet_dict):
@@ -468,6 +491,8 @@ class ImageLoader():
         elif fmt == ".i":
             return self.Load_i_file(folder, mode)
         elif fmt == ".gz":
+            return self.Load_NIfTI_Image_File(folder, mode)
+        elif fmt == ".nii":
             return self.Load_NIfTI_Image_File(folder, mode)
         else:
             raise ValueError("Unknown format")
@@ -730,13 +755,14 @@ class ImageLoader():
         return image
 
 class Preprocessor():
-    def __init__(self,dataset):
+    def __init__(self,dataset,index=None):
         self.dataset=dataset  
+        self.data = self.dataset if index is None else self.dataset[:index]
     def Dataset2DSliceId(self,sliceId=None):
         new_dataset = []
-        for mri, pet in self.dataset:
-            mri=self.ConvertToNumpy(mri)
-            pet=self.ConvertToNumpy(pet)
+        for i,(mri_img, pet_img) in enumerate(self.data):
+            mri=self.ConvertToNumpy(mri_img)
+            pet=self.ConvertToNumpy(pet_img)
 
             if sliceId is None:
                 mri2D,mriSliceId=self.GetMidSlice(mri)
@@ -824,101 +850,30 @@ class Preprocessor():
             return img
 
         return sitk.GetArrayFromImage(img)
-   
-class ImageInfo():
-    def __init__(self,image,type=""):
-        self.image=image
-        self.type=type
-    def Image_Info(self):
-        self.GetOrientartion()
-        self.GetOrigin()
-        self.GetSpacing()
-        self.GetDirection()     
-    def GetOrientartion(self):
-        orientation = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(self.image.GetDirection())
-        print("Detected "+self.type+" Image Orientartion:", orientation)                                                                
-    def GetOrigin(self):
-        origin= self.image.GetOrigin()
-        print("Detected "+self.type+" Image Origin:", origin)
-    def GetSpacing(self):
-        spacing=self.image.GetSpacing()
-        print("Detected "+self.type+" Image Spacing:", spacing)
-    def GetDirection(self):
-        direction=self.image.GetDirection()
-        print("Detected "+self.type+" Image Direction:",direction)
-   
-    def minmax_normalize(self):
-        # convert if needed
-        img = self.ConertToNumpy(self.image)
-        img = img.astype(np.float32)
+    def PlotPairs3D(self):
+        for i,(mri_img, pet_img) in enumerate(self.data):
+            self.Plot3DViews(mri_img)
+    def Plot3DViews(self,vol,subject="",subjectId="",pair=""):
+       
+            vol = self.ConvertToNumpy(vol)
+            z, y, x = vol.shape
+            print(vol.shape)
+            plt.figure(figsize=(12,4))
 
-        min_val = np.min(img)
-        max_val = np.max(img)
+            plt.subplot(1,3,1)
+            plt.imshow(vol[z//2], cmap='gray')
+            plt.title("Axial")
 
-        normalized = (img - min_val) / (max_val - min_val + 1e-8)
+            plt.subplot(1,3,2)
+            plt.imshow(vol[:, y//2, :], cmap='gray')
+            plt.title("Coronal")
 
-        return normalized
-    def gaussian_normalize(self):
-        # convert if needed
-        img = self.ConvertToNumpy(self.image)
-        img = img.astype(np.float32)
+            plt.subplot(1,3,3)
+            plt.imshow(vol[:, :, x//2], cmap='gray')
+            plt.title("Sagittal")
 
-        mean = np.mean(img)
-        std = np.std(img)
+            plt.suptitle(f"Subject({subject}):{subjectId}, Pair({pair})")  
 
-        normalized = (img - mean) / (std + 1e-8)
-
-        return normalized
-
-    def filter(self):
-        image = sitk.Median(self.image, [3, 3, 3]) 
-        image = sitk.DiscreteGaussian(image, variance=1.0)
-        return image
-    def GetDicomImageSize(self):
-
-     
-        # optional but recommended
-        image = sitk.DICOMOrient( self.image, "LPS")
-
-        # convert to numpy (z, y, x)
-        arr = self.ConvertToNumpy(image)
-
-        # number of slices
-        z = arr.shape[0]
-        y = arr.shape[1]
-        x = arr.shape[2]
-
-        print("Shape (z, y, x):", arr.shape)
-        print("Number of slices (z):", z)
-
-        return image, arr
-    
-class Visualizer():
-    def __init__(self,dataset):
-        self.dataset=dataset   
-    def Plot2DPairs(self,index=None):
-        data = self.dataset if index is None else self.dataset[:index]
-
-        for i,(mri_img, pet_img) in enumerate(data):
-            # FORCE conversion ONLY ONCE
-            mri=self.ConvertToNumpy(mri_img)  #MRI
-            pet=self.ConvertToNumpy(pet_img)  #PET
-            print("MRI shape:", mri.shape)
-            print("PET shape:", pet.shape)
-
-            plt.figure(figsize=(10,5))
-
-            plt.subplot(1,2,1)
-            plt.imshow(mri, cmap="gray" )
-            plt.title(f"MRI")
-            plt.axis("off")
-
-            plt.subplot(1,2,2)
-            plt.imshow(pet, cmap="gray" )
-            plt.title(f"PET")
-            plt.axis("off")
-
-            plt.suptitle(f"Plot 2D Pairs Subject({i+1})")
             plt.show()
     def plotThreeViewsMNITemplate(self,MNI_Root):
         MNI_Template=self.Load_MNI_Template_Image_File(MNI_Root)
@@ -928,32 +883,6 @@ class Visualizer():
         print("Spacing:", MNI_Template.GetSpacing())
         print("Origin:", MNI_Template.GetOrigin())
         print("Direction:", MNI_Template.GetDirection())
-    def PlotHist(self):
-
-        plt.hist(self.Image, bins=100)
-
-        plt.title(" Histogram")
-        plt.xlabel("Intensity")
-        plt.ylabel("Voxel Count")
-        plt.show()
-        counts, bins = np.histogram(self.image, bins=100)
-        max_bin_idx = np.argmax(counts)
-        #left_idx = max(0, max_bin_idx - 4)
-        #right_idx = min(len(bins)-1, max_bin_idx + 5)
-        #bin_min = bins[left_idx]
-        #bin_max = bins[right_idx]
-        #mask = (Image >= bin_min) & (Image < bin_max)
-        #Image[mask] = 1
-        #arr = sitk.GetArrayFromImage(Image).copy()
-
-    
-
-        #kernel = np.ones((2,2))
-
-        #count = convolve(arr.astype(np.int32), kernel, mode='constant')
-
-        #filtered = (count > 4).astype(np.uint8)
-        #return Image
     def PlotMiddleSlice(self, title=""):
         print("ITK size:", self.image.GetSize())
 
@@ -965,27 +894,6 @@ class Visualizer():
         plt.imshow(mid_slice, cmap="gray")
         plt.title(title)
         plt.axis("off")
-        plt.show()
-    def show_three_views(self,vol,subject="",subjectId="",pair=""):
-        vol = self.convert_to_NumPy(vol)
-        z, y, x = vol.shape
-        print(vol.shape)
-        plt.figure(figsize=(12,4))
-
-        plt.subplot(1,3,1)
-        plt.imshow(vol[z//2], cmap='gray')
-        plt.title("Axial")
-
-        plt.subplot(1,3,2)
-        plt.imshow(vol[:, y//2, :], cmap='gray')
-        plt.title("Coronal")
-
-        plt.subplot(1,3,3)
-        plt.imshow(vol[:, :, x//2], cmap='gray')
-        plt.title("Sagittal")
-
-        plt.suptitle(f"Subject({subject}):{subjectId}, Pair({pair})")  
-
         plt.show()
     def PlotPairsSliceID(self, sliceId,title=""):
 
@@ -1015,35 +923,187 @@ class Visualizer():
 
         plt.suptitle(title)
         plt.show()
-    def HistofPairs(self):
 
+class ImageInfo():
+    def __init__(self,image,type=""):
+        self.image=image
+        self.type=type
+    def Image_Info(self):
+        self.GetOrientartion()
+        self.GetOrigin()
+        self.GetSpacing()
+        self.GetDirection()     
+    def GetOrientartion(self):
+        orientation = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(self.image.GetDirection())
+        print("Detected "+self.type+" Image Orientartion:", orientation)                                                                
+    def GetOrigin(self):
+        origin= self.image.GetOrigin()
+        print("Detected "+self.type+" Image Origin:", origin)
+    def GetSpacing(self):
+        spacing=self.image.GetSpacing()
+        print("Detected "+self.type+" Image Spacing:", spacing)
+    def GetDirection(self):
+        direction=self.image.GetDirection()
+        print("Detected "+self.type+" Image Direction:",direction)
+ 
+    def filter(self):
+        image = sitk.Median(self.image, [3, 3, 3]) 
+        image = sitk.DiscreteGaussian(image, variance=1.0)
+        return image
+    def GetDicomImageSize(self):
 
-        # convert to numpy if needed
-        mri = self.ConvertToNumpy(self.MRI)
-        pet = self.ConvertToNumpy(self.PET)
+     
+        # optional but recommended
+        image = sitk.DICOMOrient( self.image, "LPS")
 
-        mri_flat = mri.flatten()
-        pet_flat = pet.flatten()
+        # convert to numpy (z, y, x)
+        arr = self.ConvertToNumpy(image)
 
+        # number of slices
+        z = arr.shape[0]
+        y = arr.shape[1]
+        x = arr.shape[2]
 
-        fig, axes = plt.subplots(1, 2, figsize=(12,5))
+        print("Shape (z, y, x):", arr.shape)
+        print("Number of slices (z):", z)
 
-        # MRI Histogram
-        axes[0].hist(mri.flatten(), bins=100)
+        return image, arr
+    
+class Visualizer():
+    def __init__(self,dataset,index=None):
+        self.dataset=dataset   
+        self.data = self.dataset if index is None else self.dataset[:index]
+    def Plot2DPairs(self):
+        for i,(mri_img, pet_img) in enumerate(self.data):
+            # FORCE conversion ONLY ONCE
+            mri=self.ConvertToNumpy(mri_img)  #MRI
+            pet=self.ConvertToNumpy(pet_img)  #PET
 
-        axes[0].set_title("MRI Histogram")
-        axes[0].set_xlabel("Intensity")
-        axes[0].set_ylabel("Voxel Count")
+            plt.figure(figsize=(10,5))
 
-        # PET Histogram
-        axes[1].hist(pet.flatten(), bins=100)
+            plt.subplot(1,2,1)
+            plt.imshow(mri, cmap="gray" )
+            plt.title(f"MRI")
+            plt.axis("off")
 
-        axes[1].set_title("PET Histogram")
-        axes[1].set_xlabel("Intensity")
-        axes[1].set_ylabel("Voxel Count")
+            plt.subplot(1,2,2)
+            plt.imshow(pet, cmap="gray" )
+            plt.title(f"PET")
+            plt.axis("off")
 
-        plt.tight_layout()
-        plt.show()
+            plt.suptitle(f"Plot 2D Pairs Subject({i+1})")
+            plt.show()
+    def PlotHist(self):
+        for i, (mri_img, pet_img) in enumerate(self.data):
+
+            mri = self.ConvertToNumpy(mri_img).flatten()
+            pet = self.ConvertToNumpy(pet_img).flatten()
+
+            # optional cleanup (recommended)
+            plt.figure(figsize=(10, 5))
+
+            plt.subplot(1, 2, 1)
+            plt.hist(mri, bins=100)
+            plt.title("MRI")
+            plt.xlabel("Intensity")
+            plt.ylabel("Voxel Count")
+
+            plt.subplot(1, 2, 2)
+            plt.hist(pet, bins=100)
+            plt.title("PET")
+            plt.xlabel("Intensity")
+            plt.ylabel("Voxel Count")
+
+            plt.suptitle(f"Subject {i+1}")
+            plt.show()
+    def PlotHist2(self):
+        for i, (mri_img, pet_img) in enumerate(self.data):
+
+            mri = self.ConvertToNumpy(mri_img).flatten()
+            pet = self.ConvertToNumpy(pet_img).flatten()
+            counts_mri, bins_mri = np.histogram(mri, bins=100)
+            max_idx_mri = np.argmax(counts_mri)
+            counts_mri[max_idx_mri] = 0
+
+            counts_pet, bins_pet = np.histogram(pet, bins=100)
+            max_idx_pet = np.argmax(counts_pet)
+            counts_pet[max_idx_pet] = 0
+            # optional cleanup (recommended)
+            plt.figure(figsize=(10, 5))
+
+            plt.subplot(1, 2, 1)
+            plt.bar(bins_mri[:-1], counts_mri, width=np.diff(bins_mri))
+            plt.title("MRI")
+            plt.xlabel("Intensity")
+            plt.ylabel("Voxel Count")
+
+            plt.subplot(1, 2, 2)
+            plt.bar(bins_pet[:-1], counts_pet, width=np.diff(bins_pet))
+            plt.title("PET")
+            plt.xlabel("Intensity")
+            plt.ylabel("Voxel Count")
+
+            plt.suptitle(f"Subject {i+1}")
+            plt.show()
+
+          
+            plt.figure()
+            
+            plt.show()
+            #left_idx = max(0, max_bin_idx - 4)
+            #right_idx = min(len(bins)-1, max_bin_idx + 5)
+            #bin_min = bins[left_idx]
+            #bin_max = bins[right_idx]
+            #mask = (Image >= bin_min) & (Image < bin_max)
+            #Image[mask] = 1
+            #arr = sitk.GetArrayFromImage(Image).copy()
+
+            #kernel = np.ones((2,2))
+
+            #count = convolve(arr.astype(np.int32), kernel, mode='constant')
+
+            #filtered = (count > 4).astype(np.uint8)
+            #return Image
+    def GetMinMax(self):
+        for i, (mri_img, pet_img) in enumerate(self.data):
+            mri = self.ConvertToNumpy(mri_img).flatten()
+            pet = self.ConvertToNumpy(pet_img).flatten()
+
+            print("MRI min:", mri.min(), "MRI max:", mri.max())
+            print("PET min:", pet.min(), "PET max:", pet.max())
+    def GetPairsSize(self):
+        for i,(mri_img, pet_img) in enumerate(self.data):
+            # FORCE conversion ONLY ONCE
+            mri=self.ConvertToNumpy(mri_img)  #MRI
+            pet=self.ConvertToNumpy(pet_img)  #PET
+            print("MRI shape:", mri.shape)
+            print("PET shape:", pet.shape)
+    def MaxBinSetOne(self, bins=100):
+      for i, (mri, pet) in enumerate(self.data):
+
+            mri_flat = self.ConvertToNumpy(mri).flatten()
+            pet_flat = self.ConvertToNumpy(pet).flatten()
+
+            # histogram MRI
+            mri_counts, mri_bins = np.histogram(mri_flat, bins=bins)
+            peak = np.argmax(mri_counts)
+
+            left = max(0, 0)
+            right = min(len(mri_counts) - 1, peak + 1)
+
+            mri_min = mri_bins[left]
+            mri_max = mri_bins[right + 1]
+
+            mri[(mri >= mri_min) & (mri < mri_max)] = 1
+
+            # histogram PET
+            pet_counts, pet_bins = np.histogram(pet_flat, bins=bins)
+            pet_max_bin = np.argmax(pet_counts)
+
+            pet_min = pet_bins[pet_max_bin]
+            pet_max = pet_bins[pet_max_bin + 1]
+
+            pet[(pet >= pet_min) & (pet < pet_max)] = 1
     def ConvertToNumpy(self,img):
         if img is None:
             raise ValueError("Image is None")
@@ -1052,46 +1112,116 @@ class Visualizer():
             return img
 
         return sitk.GetArrayFromImage(img)
-    def Max_bin_Set_One(self, bins=100):
-
-        # convert to numpy if needed
-        mri = self.ConvertTONumpy(self.MRI)
-        pet = self.ConvertTONumpy(self.PET)
-
-        mri_flat = mri.flatten()
-        pet_flat = pet.flatten()
-
-
-        # histogram MRI
-        mri_counts, mri_bins = np.histogram(mri_flat, bins=bins)
-        peak = np.argmax(mri_counts)
-
-        left = max(0, 0)
-        right = min(len(mri_counts) - 1, peak + 1)
-
-        mri_min = mri_bins[left]
-        mri_max = mri_bins[right + 1]
-
-        mri_masked = mri.copy()
-        mri_masked[(mri >= mri_min) & (mri < mri_max)] = 0
-
-        # histogram PET
-        pet_counts, pet_bins = np.histogram(pet_flat, bins=bins)
-        pet_max_bin = np.argmax(pet_counts)
-
-        pet_min = pet_bins[pet_max_bin]
-        pet_max = pet_bins[pet_max_bin + 1]
-
-        pet_masked = pet.copy()
-        pet_masked[(pet >= pet_min) & (pet < pet_max)] = 0
-
-
-        return mri_masked, pet_masked
+    
     def Set_Image_Info(self):
         self.MRI.SetOrigin(self.PET.GetOrigin())
         self.MRI.SetSpacing(self.PET.GetSpacing())
         self.MRI.SetDirection(self.PET.GetDirection())
-    
+    def MinMaxNormPairs(self) :
+        new_data = []
+
+        for mri_img, pet_img in self.data:
+            mri = self.ConvertToNumpy(mri_img)
+            pet = self.ConvertToNumpy(pet_img)
+
+            mri = self.minmax_normalize(mri)
+            pet = self.minmax_normalize(pet)
+
+            new_data.append((mri, pet))
+
+        self.data = new_data
+    def GaussianNormPairs(self) :
+        new_data = []
+
+        for mri_img, pet_img in self.data:
+            mri = self.ConvertToNumpy(mri_img)
+            pet = self.ConvertToNumpy(pet_img)
+
+            mri = self.gaussian_normalize(mri)
+            pet = self.gaussian_normalize(pet)
+
+            new_data.append((mri, pet))
+
+        self.data = new_data
+    def minmax_normalize(self,img):
+            img = img.astype(np.float32)
+
+            min_val = np.min(img)
+            max_val = np.max(img)
+
+            normalized = (img - min_val) / (max_val - min_val + 1e-8)
+
+            return normalized
+    def gaussian_normalize(self,img):
+        img = img.astype(np.float32)
+
+        mean = np.mean(img)
+        std = np.std(img)
+
+        normalized = (img - mean) / (std + 1e-8)
+
+        return normalized
+    def Skip(self):
+        skip_indices = {36,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67, 69, 
+                        70, 71, 72, 82, 83,84, 91, 104, 106, 111, 112, 113, 114, 118,
+                        120, 122, 123, 125, 126, 128, 129, 130,138,139,140,141,142,143, 147, 149, 153, 155, 156, 157,
+                        160, 171, 172, 177, 178, 180, 184, 188, 189, 192, 193, 194, 195,197,
+                        206, 213} 
+        self.data = [
+            item for i, item in enumerate(self.data)
+            if i not in skip_indices
+        ]
+        print(len(self.data))
+    def GetDataset(self):
+        return self.data
+    def PlotPairImageAndHist(self):
+        for i, (mri_img, pet_img) in enumerate(self.data):
+
+            mri = self.ConvertToNumpy(mri_img)
+            pet = self.ConvertToNumpy(pet_img)
+
+            mri_flat = mri.flatten()
+            pet_flat = pet.flatten()
+             # MRI histogram
+            counts_mri, bins_mri = np.histogram(mri, bins=100)
+            max_idx_mri = np.argmax(counts_mri)
+            counts_mri[max_idx_mri] = 0   # skip max bin
+
+            # PET histogram
+            counts_pet, bins_pet = np.histogram(pet, bins=100)
+            max_idx_pet = np.argmax(counts_pet)
+            counts_pet[max_idx_pet] = 0   # skip max bin
+            plt.figure(figsize=(20, 4))
+
+            # 1) MRI image
+            plt.subplot(1, 4, 1)
+            plt.imshow(mri, cmap="gray")
+            plt.title("MRI Image")
+            plt.axis("off")
+
+            # 2) PET image
+            plt.subplot(1, 4, 2)
+            plt.imshow(pet, cmap="gray")
+            plt.title("PET Image")
+            plt.axis("off")
+
+            # 3) MRI histogram
+            plt.subplot(1, 4, 3)
+            plt.bar(bins_mri[:-1], counts_mri, width=np.diff(bins_mri))
+            plt.title("MRI Histogram")
+            plt.xlabel("Intensity")
+            plt.ylabel("Count")
+
+            # 4) PET histogram
+            plt.subplot(1, 4, 4)
+            plt.bar(bins_pet[:-1], counts_pet, width=np.diff(bins_pet))
+            plt.title("PET Histogram")
+            plt.xlabel("Intensity")
+            plt.ylabel("Count")
+
+            plt.suptitle(f"Subject {i+1}")
+            plt.tight_layout()
+            plt.show()
 
 
 

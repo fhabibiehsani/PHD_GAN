@@ -274,6 +274,45 @@ def Load_nii_Files_From_Dataset(niiDatasetRoot):
 
     return samples
 #---------------------------------------------------------------------------
+def Load_nii_Files_From_Dataset2(niiDatasetRoot):
+    samples = []
+    for subject in os.listdir(niiDatasetRoot):
+       
+        subject_path = os.path.join(niiDatasetRoot, subject)
+
+        if not os.path.isdir(subject_path):
+            continue
+        mri_path = os.path.join(subject_path, "mri.nii")
+        pet_path = os.path.join(subject_path, "pet.nii")
+
+        # ✔ check files exist
+        if not os.path.exists(mri_path):
+            print("Missing MRI:", mri_path)
+            continue
+
+        if not os.path.exists(pet_path):
+            print("Missing PET:", pet_path)
+            continue
+
+        # ✔ read images
+        mri = sitk.ReadImage(mri_path)
+        pet = sitk.ReadImage(pet_path)
+        # 🔥 convert to numpy
+        mri = sitk.GetArrayFromImage(mri).astype(np.float32)
+        pet = sitk.GetArrayFromImage(pet).astype(np.float32)
+        mri = normalizeTanh(mri)
+        pet = normalizeTanh(pet)
+    
+        mri = torch.as_tensor(mri).unsqueeze(0).float()
+        pet = torch.as_tensor(pet).unsqueeze(0).float()
+        mri = resize_2d_cwh(mri, (128, 128))
+        pet = resize_2d_cwh(pet, (128, 128))
+        # 🔥 store sample
+        samples.append((mri, pet))
+
+    return samples
+#---------------------------------------------------------------------------
+
 def plot_triplet(mri, real_pet, fake_pet):
 
     mri=Convert_to_numpy(mri)
