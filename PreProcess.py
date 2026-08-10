@@ -1,4 +1,5 @@
 import os
+import cv2
 import subprocess
 import numpy as np
 import nibabel as nib
@@ -7,504 +8,108 @@ import matplotlib.pyplot as plt
 
 from scipy.ndimage import convolve
 np.set_printoptions(threshold=np.inf)
+class ImageInfo():
+    def __init__(self,image,type=""):
+        self.image=image
+        self.type=type
+    def ImageInfo(self):
+        self._GetOrientartion()
+        self._GetOrigin()
+        self._GetSpacing()
+        self._GetDirection()  
+        self._GetDicomImageSize()   
+    def _GetOrientartion(self):
+        orientation = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(self.image.GetDirection())
+        print("Detected "+self.type+" Image Orientartion:", orientation)                                                                
+    def _GetOrigin(self):
+        origin= self.image.GetOrigin()
+        print("Detected "+self.type+" Image Origin:", origin)
+    def _GetSpacing(self):
+        spacing=self.image.GetSpacing()
+        print("Detected "+self.type+" Image Spacing:", spacing)
+    def _GetDirection(self):
+        direction=self.image.GetDirection()
+        print("Detected "+self.type+" Image Direction:",direction)
+    def _GetDicomImageSize(self):
+        image = sitk.DICOMOrient(self.image, "LPS")
+        arr = self.ConvertToNumpy(image)
 
-class DatasetExplorer():
+        # number of slices
+        z = arr.shape[0]
+        y = arr.shape[1]
+        x = arr.shape[2]
 
-    def __init__(self,root_folder,dim):
-        self.root_folder = root_folder
-        self.dim=dim
-        if self.dim=="3D":
-            self.mri_root=os.path.join(self.root_folder, "MRI214", "ADNI")
-            self.pet_root=os.path.join(self.root_folder, "PET214", "ADNI")
-            self.subject=self.pet_root
-        elif self.dim=="2D":
-            self.mri_root=os.path.join(self.root_folder, "mri.nii.gz")
-            self.pet_root=os.path.join(self.root_folder, "pet.nii.gz")
-            self.subject= self.root_folder
-        elif self.dim=="2D_skip":
-             self.subject= self.root_folder
-    def FindPairFolders(self):
-        subjects = self.GetSubjects()
+        print("Shape (z, y, x):", arr.shape)
+        print("Number of slices (z):", z)
 
-        mri_dict = {}
-        pet_dict = {}
+        return image, arr     
+class ImageProcessor():
+    def __init__(self,image):
+        self.image=image
+    def NormalizeTanh(self):
+        image_min = self.image.min()
+        image_max = self.image.max()
+        self.image = (self.image - image_min) / (image_max - image_min )  # [0,1]
+        normalizedImage = self.image * 2.0 - 1.0                               # [-1,1]
+        return normalizedImage
+    def MedianFilter(self,size=5):
+        filteredImage = cv2.medianBlur(self.image, size)  # kernel size must be odd: 3,5,7,...
+        return filteredImage
+    def GaussianFilter(self):
+        image = sitk.Median(self.image, [3, 3, 3]) 
+        gaussianFilteredImage = sitk.DiscreteGaussian(image, variance=1.0)
+        return gaussianFilteredImage
+    def BiasFieldCorrectionN4(self):
+        image = sitk.GetImageFromArray(self.image)
+        # Convert to float (IMPORTANT)
+        image = sitk.Cast(image, sitk.sitkFloat32)
+        # Initial mask (foreground estimation)
+        maskImage = sitk.OtsuThreshold(image, 0, 1, 200)
+        # N4 Bias Field Correction
+        corrector = sitk.N4BiasFieldCorrectionImageFilter()
+        correctedImage = corrector.Execute(image, maskImage)
+        # Convert back to numpy
+        biasFieldCorrectionN4Image = sitk.GetArrayFromImage(correctedImage)
 
-        for subject in subjects:
-            if self.dim=="3D":
-                mri_path = os.path.join(self.mri_root, subject)
-                pet_path = os.path.join(self.pet_root, subject)
-                if not os.path.isdir(mri_path) or not os.path.exists(pet_path):
-                    continue
+        return biasFieldCorrectionN4Image
+    def ConvertToNumpy(self):
 
-                # ---------- MRI ----------
-                for root, _, _ in os.walk(mri_path):
-                    fmt = self.DetectFileExtension(root)
-                    if fmt:
-                        mri_dict[root] = fmt
-
-                # ---------- PET ----------
-                for root, _, _ in os.walk(pet_path):
-                    fmt = self.DetectFileExtension(root)
-                    if fmt:
-                        pet_dict[root] = fmt
-            elif self.dim=="2D":
-                for subject in os.listdir(self.root_folder):
-
-                    subject_path = os.path.join(self.root_folder, subject)
-
-                    if not os.path.isdir(subject_path):
-                        continue
-
-                    for pair in os.listdir(subject_path):
-
-                        pair_path = os.path.join(subject_path, pair)
-
-                        mri_path = os.path.join(pair_path, "mri.nii.gz")
-                        pet_path = os.path.join(pair_path, "pet.nii.gz")
-                        # ✔ check files exist
-                        # if not os.path.exists(mri_path):
-                        #     print("Missing MRI:", mri_path)
-                        #     continue
-
-                        # if not os.path.exists(pet_path):
-                        #     print("Missing PET:", pet_path)
-                        #     continue
-                        fmt = self.DetectFileExtension(pet_path)
-                        if fmt:
-                            pet_dict[pet_path] = fmt
-                        fmt = self.DetectFileExtension(mri_path)
-                        if fmt:
-                            mri_dict[mri_path] = fmt
-            elif self.dim=="2D_skip":
-                for subject in os.listdir(self.root_folder):
-                        mri_path = os.path.join(self.root_folder, subject,"mri.nii")
-                        pet_path = os.path.join(self.root_folder,subject,"pet.nii")
-                        
-                        fmt = self.DetectFileExtension(pet_path)
-                        if fmt:
-                            pet_dict[pet_path] = fmt
-                        fmt = self.DetectFileExtension(mri_path)
-                        if fmt:
-                            mri_dict[mri_path] = fmt
-        return mri_dict,pet_dict
-    def GetSubjects(self):
-        subjects= os.listdir(self.subject)
-        print("Total subjects:", len(subjects))
-        return subjects
-    def FindAllFileTypes(self):
-        extensions = {}
-
-        for root, _, files in os.walk(self.pet_root):
-            for f in files:
-                ext = os.path.splitext(f)[1].lower()
-
-                if ext == "":
-                    ext = "NO_EXTENSION"
-
-                extensions[ext] = extensions.get(ext, 0) + 1
-
-        print("File types:")
-        for k, v in sorted(extensions.items(), key=lambda x: -x[1]):
-            print(k, ":", v)
-
-        return extensions
-    def CountDifferentFileTypes(self):
-        dicom_folders = set()
-        v_folders = set()
-        i_folders = set()
-        for root, _, files in os.walk(self.pet_root):
-
-            has_dicom = False
-            has_v = False
-            has_i = False
-            for f in files:
-                f_lower = f.lower()
-
-                # DICOM (file-based or extension-based)
-                if f_lower.endswith(".dcm") or f_lower.endswith(".dicom"):
-                    has_dicom = True
-
-                # V files
-                if f_lower.endswith(".v"):
-                    has_v = True
-                if f_lower.endswith(".i"):
-                    has_i = True
-
-            # One time for each Folder
-            if has_dicom:
-                dicom_folders.add(root)
-
-            if has_v:
-                v_folders.add(root)
-
-            if has_i:
-                i_folders.add(root)
-
-        print("Results:")
-        print("DICOM folders:", len(dicom_folders))
-        print("V folders:", len(v_folders))
-        print("i folders:", len(i_folders))
-        print("Total medical folders:", len(dicom_folders) + len(v_folders)+ len(i_folders))
-    def CheckAnyUniqueImageSize(self, dtype='>i2'):
-        size_counts = {}   
-        examples = {}     
-
-        for root, _, files in os.walk(self.pet_root):
-            for f in files:
-                if f.lower().endswith(".i"):
-                    file_path = os.path.join(root, f)
-
-                    try:
-                        file_size = os.path.getsize(file_path)
-
-                        best_size = None
-
-                        # Try dif Header
-                        for header in [0, 1024, 2048, 4096, 8192]:
-                            data = np.fromfile(file_path, dtype=dtype, offset=header)
-                            size = data.size
-                            print(size)
-
-                            if best_size is None:
-                                best_size = size
-
-                        #Count
-                        if best_size not in size_counts:
-                            size_counts[best_size] = 0
-                            examples[best_size] = file_path
-
-                        size_counts[best_size] += 1
-
-                    except Exception as e:
-                        print("❌ Error:", file_path, e)
-        print(best_size)
-        print("\nUnique sizes with counts:\n")
-
-        for size, count in sorted(size_counts.items()):
-            print(f"Size: {size}  →  Count: {count}")
-            print(f"Example file: {examples[size]}")
-            print("-" * 50)
-
-        print("Total unique sizes:", len(size_counts))
-    def IsFileExtension(self,extension,files):
-        return any(f.lower().endswith(extension) for f in files)
-    def DetectFileExtension(self,path):
-        # If path is a file
-        if os.path.isfile(path):
-
-            if path.lower().endswith(".nii"):
-                return ".nii"
-
-            return os.path.splitext(path)[1].lower()
-
-        # If path is a directory
-        elif os.path.isdir(path):
-
-            files = os.listdir(path)
-
-            if self.IsFileExtension('.dcm', files):
-                return ".dicom"
-            elif self.IsFileExtension('.v', files):
-                return ".v"
-            elif self.IsFileExtension('.i', files):
-                return ".i"
-            elif self.IsFileExtension('.hdr', files):
-                return ".hdr"
-            elif self.IsFileExtension('.nii', files):
-                return ".nii"
-
-        return None
-    
-    def HasTimeDimention(self):
-        reader = sitk.ImageSeriesReader()
-        dicom_names = reader.GetGDCMSeriesFileNames(self.root_folder)
-
-        reader.MetaDataDictionaryArrayUpdateOn()
-        reader.LoadPrivateTagsOn()
-        reader.SetFileNames(dicom_names)
-
-        reader.Execute()
-
-        times = []
-
-        for i in range(len(dicom_names)):
-            if reader.HasMetaDataKey(i, "0054|1300"):  # Frame Reference Time
-                times.append(reader.GetMetaData(i, "0054|1300"))
-
-        return len(set(times)) > 1
-    def DetectPETImageType(self):
-        if self.IsDynamicPETImage(self.root_folder):
-            return "Dynamic PET"
-        elif self.HasTimeDimention(self.root_folder):
-            return "Dynamic PET"
-        else:
-            return "Static PET"
-    def skull_strip_remove_neck(input_img, output_img, frac=0.3):
-        cmd = [
-            "bet",
-            input_img,
-            output_img,
-            "-R",   # robust center estimation
-            "-B",   # bias field + better cleanup
-            "-f", str(frac),  # fractional intensity (try 0.25–0.4)
-            "-g", "0",         # vertical gradient (important for neck removal)
-            "-m"   # also output mask
-        ]
-        subprocess.run(cmd, check=True)
-    def ConvertToNumpy(img):
-        if img is None:
+        if self.image is None:
             raise ValueError("Image is None")
 
-        if isinstance(img, np.ndarray):
-            return img
+        if isinstance(self.image, np.ndarray):
+            return self.image
 
-        return sitk.GetArrayFromImage(img)
+        if isinstance(self.image, sitk.Image):
+            return sitk.GetArrayFromImage(self.image)
 
-class DatasetBuilder():
-    def __init__(self,dataset,input_nii,output_2D_nii_Dataset):
-        self.input_nii = input_nii
-        self.output_2D_nii_Dataset = output_2D_nii_Dataset   
-        self.dataset=dataset
-    def Create_dataset_nii(self,mri_np,pet_np,subject,count):
-        affine = np.eye(4)
-
-        mri_nii = nib.Nifti1Image(mri_np, affine)
-        pet_nii = nib.Nifti1Image(pet_np, affine)
-
-        subject_out = os.path.join(self.root_folder, subject)
-        pair_out = os.path.join(subject_out, f"pair_{count:02d}")
-
-        mri_out_dir = os.path.join(pair_out, "mri")
-        pet_out_dir = os.path.join(pair_out, "pet")
-
-        os.makedirs(mri_out_dir, exist_ok=True)
-        os.makedirs(pet_out_dir, exist_ok=True)
-
-        mri_path = os.path.join(mri_out_dir, "mri.nii.gz")
-        pet_path = os.path.join(pet_out_dir, "pet.nii.gz")
-
-        nib.save(mri_nii, mri_path)
-        nib.save(pet_nii, pet_path)
-    def Create_3D_nii_Dataset(self):
-
-        MNI_Template=self.Load_MNI_Template_Image_File(self.MNI_Root)  
-
-        os.makedirs(self.output_dir, exist_ok=True)
-        totalPairImagesCount = 0
-
-        subjects = os.listdir(self.mri_root)
-        print("Total subjects:", len(subjects))
-
-        for i, subject in enumerate(subjects):
-
-            print("Subject",i+1,":", subject)
-
-            eachSubjectPairImagesCount=1
-
-            mri_path = os.path.join(self.mri_root, subject)
-            pet_path = os.path.join(self.pet_root, subject)
-
-            if not os.path.isdir(mri_path):
-                continue
-            if not os.path.exists(pet_path):
-                continue
-
-            if os.path.isdir(mri_path) and os.path.exists(pet_path):
-
-                mri_folders = []
-                pet_folders = []
-
-                # collect all MRI folders
-                for d, _, _ in os.walk(mri_path):
-                    fmt = self.detect_format(d)
-                    if fmt:
-                        mri_folders.append(d)
-
-                # collect all PET folders
-                for d, _, _ in os.walk(pet_path):
-                    fmt = self.detect_format(d)
-                    if fmt:
-                        pet_folders.append(d)
-
-                # loop over pairs
-                for idx,(mri_folder, pet_folder) in enumerate(zip(mri_folders, pet_folders)):
-                    
-                    mri_fmt = self.detect_format(mri_folder)
-                    pet_fmt = self.detect_format(pet_folder)
-                    mri, mri_frames = self.Load_Images(mri_folder, mri_fmt,"mri")
-                    pet, pet_frames = self.Load_Images(pet_folder, pet_fmt,"pet")
-
-                    subject_out = os.path.join(self.output_dir, subject)
-                    os.makedirs(subject_out, exist_ok=True)
-
-                    pair_out = os.path.join(subject_out, f"pair_{idx+1}")
-                    os.makedirs(pair_out, exist_ok=True)
-
-                    # ✔
-                    mri= self.register_pet_to_mri(mri, MNI_Template)
-                    pet= self.register_pet_to_mri(pet, mri)
-
-                    # ✔ save correctly
-                    sitk.WriteImage(mri, os.path.join(pair_out, "mri.nii.gz"))
-                    sitk.WriteImage(pet, os.path.join(pair_out, "pet.nii.gz"))
-
-                    print(eachSubjectPairImagesCount)
-                    eachSubjectPairImagesCount+=1
-                totalPairImagesCount += 1
-        print ("Total Pair Images:",totalPairImagesCount) 
-    def Create_2D_nii_Dataset(self,sliceId):
-        totalPairImagesCount=0
-        for subjectCounter,subject in  enumerate(os.listdir(self.input_nii)):
-            print("Subject",subjectCounter+1,":", subject)
-
-            subject_path = os.path.join(self.input_nii, subject)
-
-            if not os.path.isdir(subject_path):
-                continue
-
-            for pairCounter, pair in enumerate(os.listdir(subject_path)):
-
-                pair_path = os.path.join(subject_path, pair)
-
-                mri_path = os.path.join(pair_path, "mri.nii.gz")
-                pet_path = os.path.join(pair_path, "pet.nii.gz")
-
-                # ✔ check files exist
-                if not os.path.exists(mri_path):
-                    print("Missing MRI:", mri_path)
-                    continue
-
-                if not os.path.exists(pet_path):
-                    print("Missing PET:", pet_path)
-                    continue
-
-                # ✔ read images
-                mri = self.Load_NIfTI_Image_File(mri_path)
-                pet = self.Load_NIfTI_Image_File(pet_path)
-
-                subject_out = os.path.join(self.output_2D_nii_Dataset, subject)
-                os.makedirs(subject_out, exist_ok=True)
-
-                pair_out = os.path.join(subject_out, f"pair_{pairCounter+1}")
-                os.makedirs(pair_out, exist_ok=True)
-                mri_s = self.get_slice_Id(mri, sliceId)
-                pet_s = self.get_slice_Id(pet, sliceId)
-
-                #plot_pair_2D(mri_s, pet_s)
-
-                # ✔ save correctly
-                sitk.WriteImage(mri_s, os.path.join(pair_out, "mri.nii.gz"))
-                sitk.WriteImage(pet_s, os.path.join(pair_out, "pet.nii.gz"))
-
-                print(pairCounter+1)
-                pairCounter+=1
-            totalPairImagesCount += 1
-        print("Total Pair Images:",totalPairImagesCount) 
-    def Create_2D_Normalized_Filtered_nii_Dataset(self):
-        totalPairImagesCount=0
-        for subjectCounter,subject in  enumerate(os.listdir(self.input_nii)):
-            print("Subject",subjectCounter+1,":", subject)
-
-            subject_path = os.path.join(self.input_nii, subject)
-
-            if not os.path.isdir(subject_path):
-                continue
-
-            for pairCounter, pair in enumerate(os.listdir(subject_path)):
-
-                pair_path = os.path.join(subject_path, pair)
-
-                mri_path = os.path.join(pair_path, "mri.nii.gz")
-                pet_path = os.path.join(pair_path, "pet.nii.gz")
-
-                # ✔ check files exist
-                if not os.path.exists(mri_path):
-                    print("Missing MRI:", mri_path)
-                    continue
-
-                if not os.path.exists(pet_path):
-                    print("Missing PET:", pet_path)
-                    continue
-
-                # ✔ read images
-                mri = self.Load_NIfTI_Image_File(mri_path)
-                pet = self.Load_NIfTI_Image_File(pet_path)
-                mri=self.minmax_normalize(mri)
-                pet=self.minmax_normalize(pet)
-                mri_masked, pet_masked=self.Max_bin_Set_One(mri, pet)
-
-                subject_out = os.path.join(self.output_2D_nii_Dataset, subject)
-                os.makedirs(subject_out, exist_ok=True)
-
-                pair_out = os.path.join(subject_out, f"pair_{pairCounter+1}")
-                os.makedirs(pair_out, exist_ok=True)
-
-                self.plot_pair_2D(mri_masked, pet_masked)
-
-                # ✔ save correctly
-                sitk.WriteImage(mri_masked, os.path.join(pair_out, "mri.nii.gz"))
-                sitk.WriteImage(pet_masked, os.path.join(pair_out, "pet.nii.gz"))
-
-                print(pairCounter+1)
-                pairCounter+=1
-            totalPairImagesCount += 1
-        print("Total Pair Images:",totalPairImagesCount) 
-    def CreateDataset2D(self):
-        for i,(mri2D, pet2D) in enumerate(self.dataset):
-                subject_out = os.path.join(self.output_2D_nii_Dataset, str(i+1))
-                os.makedirs(subject_out, exist_ok=True)
-                mri_img = sitk.GetImageFromArray(mri2D)
-                pet_img = sitk.GetImageFromArray(pet2D)
-                # ✔ save correctly
-                sitk.WriteImage(mri_img, os.path.join(subject_out, "mri.nii"))
-                sitk.WriteImage(pet_img, os.path.join(subject_out, "pet.nii"))
-
+        raise TypeError(f"Unsupported type: {type(self.image)}")
 class ImageLoader():
-    def __init__(self,mri_dict, pet_dict):
-        self.mri_dict = mri_dict
-        self.pet_dict = pet_dict
-    
-    def Load_Dataset(self,number=None):
-        dataset = []
-
-        items = list(zip(self.mri_dict.items(), self.pet_dict.items()))
-        if number is not None:
-            items = items[:number]
-
-        for (mri_folder, mri_fmt), (pet_folder, pet_fmt) in items:
-         
-            # print("MRI Folder:", mri_folder)
-            # print("MRI Format:", mri_fmt)
-
-            # print("PET Folder:", pet_folder)
-            # print("PET Format:", pet_fmt)
-
-            mri, mri_frames = self.Load_Images(mri_folder, mri_fmt, "mri")
-            pet, pet_frames = self.Load_Images(pet_folder, pet_fmt, "pet")
-            dataset.append((mri, pet))
-        return dataset
-    def Load_Images(self,folder, fmt, mode):
-        if fmt == ".dicom":
-            return self.Load_dicom_file(folder, mode)
-        elif fmt == ".v":
-            return self.Load_v_file(folder, mode)
-        elif fmt == ".i":
-            return self.Load_i_file(folder, mode)
-        elif fmt == ".gz":
-            return self.Load_NIfTI_Image_File(folder, mode)
-        elif fmt == ".nii":
-            return self.Load_NIfTI_Image_File(folder, mode)
+    def __init__(self,folder ,fmt, mode):
+        self.folder=folder
+        self.fmt=fmt
+        self.mode=mode
+    def LoadImages(self):
+        if self.fmt == ".dicom":
+            return self.Load_dicom_file()
+        elif self.fmt == ".v":
+            return self.Load_v_file()
+        elif self.fmt == ".i":
+            return self.Load_i_file()
+        elif self.fmt == ".gz":
+            return self.Load_NIfTI_Image_File()
+        elif self.fmt == ".nii":
+            return self.Load_NIfTI_Image_File()
         else:
             raise ValueError("Unknown format")
-    def Load_dicom_file(self,folder, mode):
-        frames=1
+    def Load_dicom_file(self, frames=1):
         reader = sitk.ImageSeriesReader()
-        dicom_names = reader.GetGDCMSeriesFileNames(folder)
+        dicom_names = reader.GetGDCMSeriesFileNames(self.folder)
         n = len(dicom_names)
         if n == 0:
             return None
 
-        if mode=="pet" and self.IsDynamicPETImage(folder):
+        if self.mode=="pet" and self.IsDynamicPETImage():
             dicom_names = dicom_names[:n // 6]
             frames=6
         reader.SetFileNames(dicom_names)
@@ -513,14 +118,10 @@ class ImageLoader():
         except:
             return None
         
-        #image=crop_empty_space(image)
-        image = sitk.DICOMOrient(image, "RAI")           #Orientation : RAS   #LPS
         
+        image = sitk.DICOMOrient(image, "RAI")      #Orientation : RAS   #LPS
         image=self.ConvertImageToFloat32(image)     #Type conversion
-   
         image = sitk.RescaleIntensity(image, 0, 1)
-
-        #image = sitk.Median(image, [1, 1, 1])            #Filter denoising
         image = sitk.DiscreteGaussian(image, variance=1.0)
         original = image
         arr = sitk.GetArrayFromImage(image)              #Normalization
@@ -529,13 +130,13 @@ class ImageLoader():
         arr = np.where(arr < 0.01, 0, arr)
         image = sitk.GetImageFromArray(arr)
         image.CopyInformation(original)
-        if mode=="pet" and (image.GetSize()==(128, 128, 47) or image.GetSize()==(400, 400, 109) or image.GetSize()==(128, 128, 31)):
+        if self.mode=="pet" and (image.GetSize()==(128, 128, 47) or image.GetSize()==(400, 400, 109) or image.GetSize()==(128, 128, 31)):
             image = sitk.DICOMOrient(image, "LAS") 
             image.SetDirection([-1,0,0, 0,-1,0, 0,0,-1]) 
         return (image,frames)
-    def Load_v_file(self, folder, mode="",frames=6, slices=63, rows=128, cols=128, header=0):
+    def Load_v_file(self, frames=6, slices=63, rows=128, cols=128, header=0):
         v_files = []
-        for root, _, files in os.walk(folder):
+        for root, _, files in os.walk(self.folder):
             for f in files:
                 if f.endswith(".v"):
                     v_files.append(os.path.join(root, f))
@@ -580,6 +181,7 @@ class ImageLoader():
         
         # convert to SimpleITK
         image = sitk.GetImageFromArray(arr)
+        image = sitk.RescaleIntensity(image, 0, 1)
         image = sitk.DICOMOrient(image, "RPS")
         if "30_min_3D_FDG_4i_16s" in v_files[0]:
             image.SetSpacing((2.1, 2.1, 2.4))
@@ -588,9 +190,9 @@ class ImageLoader():
         image.SetOrigin((128.0, 128.0, 75.6))
         image.SetDirection([-1,0,0, 0,-1,0,0,0,-1])
         return (image,frames)
-    def Load_i_file(self, folder, mode="",dtype=np.float32, slices=207, rows=256,cols=256,header=0):
+    def Load_i_file(self, frames=1 ,slices=207, rows=256,cols=256,header=0):
         i_files = []
-        for root, _, files in os.walk(folder):
+        for root, _, files in os.walk(self.folder):
             for f in files:
                 if f.endswith(".i"):
                     i_files.append(os.path.join(root, f))
@@ -600,7 +202,7 @@ class ImageLoader():
         
         # read data
         file_path = i_files[0]
-        data = np.fromfile(file_path, dtype=dtype, offset=header)
+        data = np.fromfile(file_path, dtype=np.float32, offset=header)
         data = data.astype(np.float32)
         #print("Raw Data size:", data.size)
 
@@ -626,16 +228,25 @@ class ImageLoader():
         arr = np.where(arr < 0.01, 0, arr)  #all pix less than 0.01 set 0
         # convert to SimpleITK
         image = sitk.GetImageFromArray(arr)
+        image = sitk.RescaleIntensity(image, 0, 1)
         image = sitk.DICOMOrient(image, "RPI")
         image.SetSpacing((1.2, 1.2,1.2))
         image.SetOrigin((128.0, 128.0, 75.6))
-        image.SetDirection([-1,0,0,
-                    0,-1,0,
-                    0,0,-1])
+        image.SetDirection([-1,0,0,0,-1,0,0,0,-1])
         return (image,frames)
-    def IsDynamicPETImage(self,folder):
+    def Load_NIfTI_Image_File(self):
+        image = sitk.ReadImage(self.folder)
+        if image.GetDimension() == 3:
+            image = sitk.DICOMOrient(image, "RAI")
+            image.SetDirection([-1,0,0, 0,-1,0, 0,0,-1])
+        else:
+            image.SetDirection([-1,0, 0,-1])
+        image = self.ConvertImageToFloat32(image)
+        image = sitk.RescaleIntensity(image, 0, 1)
+        return image, 1
+    def IsDynamicPETImage(self):
         reader = sitk.ImageSeriesReader()
-        dicom_names = reader.GetGDCMSeriesFileNames(folder)
+        dicom_names = reader.GetGDCMSeriesFileNames(self.folder)
 
         reader.SetFileNames(dicom_names)
 
@@ -649,17 +260,278 @@ class ImageLoader():
             return num_frames > 1
         except:
             return False
-    
-    def Load_png(self,MNI_Root):
+    def ConvertImageToFloat32(self,image):
+        image = sitk.Cast(image, sitk.sitkFloat32)
+        return image          
+class DatasetExplorer():
 
-        img = plt.imread(self.root_folder)
-        return img
-    def Load_MNI_Template_Image_File(MNI_Root):
-        MNI_Template = sitk.ReadImage(MNI_Root)
-        MNI_Template = sitk.DICOMOrient(MNI_Template, "LAI")
-        MNI_Template = sitk.Cast(MNI_Template, sitk.sitkFloat32) 
-        MNI_Template.SetDirection([-1,0,0, 0,-1,0, 0,0,-1])
-        return MNI_Template
+    def __init__(self,root_folder,dim):
+        super().__init__()
+        self.root_folder = root_folder
+        self.dim=dim
+        if self.dim=="3D":
+            self.mri_root=os.path.join(self.root_folder, "MRI214", "ADNI")
+            self.pet_root=os.path.join(self.root_folder, "PET214", "ADNI")
+            self.subject=self.pet_root
+        elif self.dim=="2D":
+            self.mri_root=os.path.join(self.root_folder, "mri.nii.gz")
+            self.pet_root=os.path.join(self.root_folder, "pet.nii.gz")
+            self.subject= self.root_folder
+        elif self.dim=="2D_skip":
+            self.mri_root=self.root_folder
+            self.pet_root=self.root_folder
+            self.subject= self.root_folder
+
+    def GetSubjects(self):
+        subjects= os.listdir(self.subject)
+        print("Total subjects:", len(subjects))
+        return subjects
+    def FindPairFolders(self,file_format=None):
+        subjects = self.GetSubjects()
+
+        mri_dict = {}
+        pet_dict = {}
+
+        for subject in subjects:
+            if self.dim=="3D":
+                mri_path = os.path.join(self.mri_root, subject)
+                pet_path = os.path.join(self.pet_root, subject)
+                if not os.path.isdir(mri_path) or not os.path.exists(pet_path):
+                    continue
+
+                # ---------- MRI ----------
+                for root, _, _ in os.walk(mri_path):
+                    fmt = self.DetectFileExtension(root)
+                    if fmt and (file_format is None or fmt == file_format):
+                        mri_dict[root] = fmt
+
+                # ---------- PET ----------
+                for root, _, _ in os.walk(pet_path):
+                    fmt = self.DetectFileExtension(root)
+                    if fmt and (file_format is None or fmt == file_format):
+                        pet_dict[root] = fmt
+            elif self.dim=="2D":
+                for subject in os.listdir(self.root_folder):
+
+                    subject_path = os.path.join(self.root_folder, subject)
+
+                    if not os.path.isdir(subject_path):
+                        continue
+
+                    for pair in os.listdir(subject_path):
+
+                        pair_path = os.path.join(subject_path, pair)
+
+                        mri_path = os.path.join(pair_path, "mri.nii.gz")
+                        pet_path = os.path.join(pair_path, "pet.nii.gz")
+                        # ✔ check files exist
+                        # if not os.path.exists(mri_path):
+                        #     print("Missing MRI:", mri_path)
+                        #     continue
+
+                        # if not os.path.exists(pet_path):
+                        #     print("Missing PET:", pet_path)
+                        #     continue
+                        fmt = self.DetectFileExtension(pet_path)
+                        if fmt and (file_format is None or fmt == file_format):
+                            pet_dict[pet_path] = fmt
+                        fmt = self.DetectFileExtension(mri_path)
+                        if fmt and (file_format is None or fmt == file_format):
+                            mri_dict[mri_path] = fmt
+            elif self.dim=="2D_skip":
+                for subject in os.listdir(self.root_folder):
+                        mri_path = os.path.join(self.root_folder, subject,"mri.nii")
+                        pet_path = os.path.join(self.root_folder,subject,"pet.nii")
+                        
+                        fmt = self.DetectFileExtension(pet_path)
+                        if fmt and (file_format is None or fmt == file_format):
+                            pet_dict[pet_path] = fmt
+                        fmt = self.DetectFileExtension(mri_path)
+                        if fmt and (file_format is None or fmt == file_format):
+                            mri_dict[mri_path] = fmt
+        return mri_dict,pet_dict
+  
+    def FindAllFileTypes(self):
+        extensions = {}
+
+        for root, _, files in os.walk(self.pet_root):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+
+                if ext == "":
+                    ext = "NO_EXTENSION"
+
+                extensions[ext] = extensions.get(ext, 0) + 1
+
+        print("File types:")
+        for k, v in sorted(extensions.items(), key=lambda x: -x[1]):
+            print(k, ":", v)
+
+        return extensions
+    def CountDifferentFileTypes(self):
+        dicom_folders = set()
+        v_folders = set()
+        i_folders = set()
+        nii_folders=set()
+        for root, _, files in os.walk(self.pet_root):
+
+            has_dicom = False
+            has_v = False
+            has_i = False
+            has_nii = False
+            for f in files:
+                f_lower = f.lower()
+
+                # DICOM (file-based or extension-based)
+                if f_lower.endswith(".dcm") or f_lower.endswith(".dicom"):
+                    has_dicom = True
+
+                # V files
+                if f_lower.endswith(".v"):
+                    has_v = True
+                if f_lower.endswith(".i"):
+                    has_i = True
+                if f_lower.endswith(".nii"):
+                    has_nii = True
+
+            # One time for each Folder
+            if has_dicom:
+                dicom_folders.add(root)
+            if has_v:
+                v_folders.add(root)
+            if has_i:
+                i_folders.add(root)
+            if has_nii:
+                nii_folders.add(root)
+
+        print("Results:")
+        print("DICOM folders:", len(dicom_folders))
+        print("V folders:", len(v_folders))
+        print("i folders:", len(i_folders))
+        print("nii folders:", len(i_folders))
+        print("Total medical folders:", len(dicom_folders) + len(v_folders)+ len(i_folders)+ len(nii_folders))
+    def CheckAnyUniqueImageSize(self, dtype='>i2'):
+        size_counts = {}   
+        examples = {}     
+
+        for root, _, files in os.walk(self.pet_root):
+            for f in files:
+                if f.lower().endswith(".i"):
+                    file_path = os.path.join(root, f)
+
+                    try:
+                        file_size = os.path.getsize(file_path)
+
+                        best_size = None
+
+                        # Try dif Header
+                        for header in [0, 1024, 2048, 4096, 8192]:
+                            data = np.fromfile(file_path, dtype=dtype, offset=header)
+                            size = data.size
+                            print(size)
+
+                            if best_size is None:
+                                best_size = size
+
+                        #Count
+                        if best_size not in size_counts:
+                            size_counts[best_size] = 0
+                            examples[best_size] = file_path
+
+                        size_counts[best_size] += 1
+
+                    except Exception as e:
+                        print("❌ Error:", file_path, e)
+        print(best_size)
+        print("\nUnique sizes with counts:\n")
+
+        for size, count in sorted(size_counts.items()):
+            print(f"Size: {size}  →  Count: {count}")
+            print(f"Example file: {examples[size]}")
+            print("-" * 50)
+
+        print("Total unique sizes:", len(size_counts))
+    def DetectFileExtension(self,path):
+        # If path is a file
+        if os.path.isfile(path):
+
+            if path.lower().endswith(".nii"):
+                return ".nii"
+
+            return os.path.splitext(path)[1].lower()
+
+        # If path is a directory
+        elif os.path.isdir(path):
+
+            files = os.listdir(path)
+
+            if self.IsFileExtension('.dcm', files):
+                return ".dicom"
+            elif self.IsFileExtension('.v', files):
+                return ".v"
+            elif self.IsFileExtension('.i', files):
+                return ".i"
+            elif self.IsFileExtension('.hdr', files):
+                return ".hdr"
+            elif self.IsFileExtension('.nii', files):
+                return ".nii"
+
+        return None
+    def IsFileExtension(self,extension,files):
+        return any(f.lower().endswith(extension) for f in files)
+    def HasTimeDimention(self):
+        reader = sitk.ImageSeriesReader()
+        dicom_names = reader.GetGDCMSeriesFileNames(self.root_folder)
+
+        reader.MetaDataDictionaryArrayUpdateOn()
+        reader.LoadPrivateTagsOn()
+        reader.SetFileNames(dicom_names)
+
+        reader.Execute()
+
+        times = []
+
+        for i in range(len(dicom_names)):
+            if reader.HasMetaDataKey(i, "0054|1300"):  # Frame Reference Time
+                times.append(reader.GetMetaData(i, "0054|1300"))
+
+        return len(set(times)) > 1
+    def DetectPETImageType(self):
+        if self.IsDynamicPETImage(self.root_folder):
+            return "Dynamic PET"
+        elif self.HasTimeDimention(self.root_folder):
+            return "Dynamic PET"
+        else:
+            return "Static PET"
+class DatasetLoader():
+    def __init__(self,mri_dict, pet_dict):
+        super().__init__()
+        self.mri_dict = mri_dict
+        self.pet_dict = pet_dict
+    
+    def LoadDataset(self,number=None):
+      
+        dataset = []
+        items = list(zip(self.mri_dict.items(), self.pet_dict.items()))
+        if number is not None:
+            items = items[:number]
+        print(len(items))
+        for (mri_folder, mri_fmt), (pet_folder, pet_fmt) in items:
+            
+            mriImageLoader=ImageLoader(mri_folder, mri_fmt, "mri")
+            petImageLoader=ImageLoader(pet_folder, pet_fmt, "pet")
+            
+
+            # print("MRI Folder:", mri_folder)
+            # print("MRI Format:", mri_fmt)
+
+            # print("PET Folder:", pet_folder)
+            # print("PET Format:", pet_fmt)
+
+            mri, mri_frames = mriImageLoader.LoadImages()
+            pet, pet_frames = petImageLoader.LoadImages()
+            dataset.append((mri, pet))
+        return dataset
     def Load_nii_Dataset(self,input_nii):
 
         for subjectCounter,subject in  enumerate(os.listdir(input_nii)):
@@ -711,16 +583,6 @@ class ImageLoader():
                 print("pet_masked max:", pet_masked.max())
                 #break
         # break
-    def Load_NIfTI_Image_File(self,folder, mode):
-        img = sitk.ReadImage(folder)
-        if img.GetDimension() == 3:
-            img = sitk.DICOMOrient(img, "RAI")
-            img.SetDirection([-1,0,0, 0,-1,0, 0,0,-1])
-        else:
-            img.SetDirection([-1,0, 0,-1])
-        img = sitk.Cast(img, sitk.sitkFloat32) 
-        
-        return img, 1
     def Load_nii_files_fromDataset(self,output_2D_nii_Dataset):
         for subject in os.listdir(output_2D_nii_Dataset):
 
@@ -749,41 +611,53 @@ class ImageLoader():
                 mri = sitk.ReadImage(mri_path)
                 pet = sitk.ReadImage(pet_path)
                 # To Do
-                print("Loaded:", subject, pair)
-    def ConvertImageToFloat32(self,image):
-        image = sitk.Cast(image, sitk.sitkFloat32)
-        return image
-
+                print("Loaded:", subject, pair)  
 class Preprocessor():
     def __init__(self,dataset,index=None):
-        self.dataset=dataset  
-        self.data = self.dataset if index is None else self.dataset[:index]
-    def Dataset2DSliceId(self,sliceId=None):
-        new_dataset = []
-        for i,(mri_img, pet_img) in enumerate(self.data):
-            mri=self.ConvertToNumpy(mri_img)
-            pet=self.ConvertToNumpy(pet_img)
+        self.dataset = dataset if index is None else dataset[:index]
+        #3D Dataset
+    def Extract2Ddatasetfrom3DdatasetperSliceIds(self,sliceIds):
+            new2Ddataset=[]
+            for sliceId in sliceIds:
+                dataset=self._Extract2Ddatasetfrom3Ddataset(sliceId)
+                new2Ddataset.extend(dataset)
+            return new2Ddataset
+    def _Extract2Ddatasetfrom3Ddataset(self,sliceId=None):
+        new2Ddataset = []
+        for mri_img, pet_img in self.dataset:
+            mri=Image3D(mri_img,"MRI")
+            pet=Image3D(pet_img,"PET")
+            # mri= mri.ConvertToNumpy()
+            # pet= pet.ConvertToNumpy()
 
             if sliceId is None:
-                mri2D,mriSliceId=self.GetMidSlice(mri)
-                pet2D,petSliceId=self.GetMidSlice(pet)
+                mri2D,mriSliceId=mri.GetMidSlice()
+                pet2D,petSliceId=pet.GetMidSlice()
+                # mri2D=self.normalizeTanh(mri2D)
+                # pet2D=self.normalizeTanh(pet2D)
             else:
-                mri2D=self.GetSliceId(mri,sliceId)
-                pet2D=self.GetSliceId(pet,sliceId)
+                # for sliceId in sliceIds:
+                    mri2D,mriSliceId=mri.GetSliceId(sliceId)
+                    pet2D,petSliceId=pet.GetSliceId(sliceId)
+                    # mri2D=self.normalizeTanh(mri2D)
+                    # pet2D=self.normalizeTanh(pet2D)
 
-            new_dataset.append((mri2D, pet2D))   
+            new2Ddataset.append((mri2D, pet2D))   
 
-            dataset2D = new_dataset
-        return dataset2D
-    def RegisteredDataset(self):
-        new_dataset = []
+        return new2Ddataset
 
+    def RegisterDataset(self,MNI):
+        registeredDataset = []
+        counter=1
         for mri, pet in self.dataset:
-            pet_reg = self.register_pet_to_mri(mri, pet)
-            new_dataset.append((mri, pet_reg))
+            print(counter)
+            counter+=1
+            registeredmri= self._RegisterPetToMri(MNI, mri)
+            registeredPet= self._RegisterPetToMri(registeredmri, pet)
+            registeredDataset.append((registeredmri, registeredPet))
 
-        self.dataset = new_dataset
-    def register_pet_to_mri(self,MRI,PET):
+        self.dataset = registeredDataset
+    def _RegisterPetToMri(self,MRI,PET):
         
         # ---------- initial alignment ----------
         initial_transform = sitk.CenteredTransformInitializer(
@@ -834,333 +708,34 @@ class Preprocessor():
         PET.GetPixelID()
     )
         return pet_registered
-    def GetMidSlice(self,image):
-        mid = image.shape[0] // 2
-        sl = image[mid]
-        return sl, mid   
-    def GetSliceId(self,image,sliceId):
-        if sliceId < 0 or sliceId >= image.shape[0]:
-            raise ValueError("sliceId out of range")
-        return image[sliceId]
-    def ConvertToNumpy(self,img):
-        if img is None:
-            raise ValueError("Image is None")
 
-        if isinstance(img, np.ndarray):
-            return img
-
-        return sitk.GetArrayFromImage(img)
-    def PlotPairs3D(self):
-        for i,(mri_img, pet_img) in enumerate(self.data):
-            self.Plot3DViews(mri_img)
-    def Plot3DViews(self,vol,subject="",subjectId="",pair=""):
-       
-            vol = self.ConvertToNumpy(vol)
-            z, y, x = vol.shape
-            print(vol.shape)
-            plt.figure(figsize=(12,4))
-
-            plt.subplot(1,3,1)
-            plt.imshow(vol[z//2], cmap='gray')
-            plt.title("Axial")
-
-            plt.subplot(1,3,2)
-            plt.imshow(vol[:, y//2, :], cmap='gray')
-            plt.title("Coronal")
-
-            plt.subplot(1,3,3)
-            plt.imshow(vol[:, :, x//2], cmap='gray')
-            plt.title("Sagittal")
-
-            plt.suptitle(f"Subject({subject}):{subjectId}, Pair({pair})")  
-
-            plt.show()
-    def plotThreeViewsMNITemplate(self,MNI_Root):
-        MNI_Template=self.Load_MNI_Template_Image_File(MNI_Root)
-        self.show_three_views(MNI_Template)
-        print("Dimension:", MNI_Template.GetDimension())
-        print("Size:", MNI_Template.GetSize())
-        print("Spacing:", MNI_Template.GetSpacing())
-        print("Origin:", MNI_Template.GetOrigin())
-        print("Direction:", MNI_Template.GetDirection())
-    def PlotMiddleSlice(self, title=""):
-        print("ITK size:", self.image.GetSize())
-
-        arr = self.ConvertToNumpy(self.image)
-        arr = np.transpose(arr, (1, 2, 0))
-        mid_slice = arr[arr.shape[0] // 2]
+    def PlotPairs3DViews(self):
+        print(len(self.dataset))
+        for i, (mri, pet) in enumerate( self.dataset):
+            mri=Image3D(mri,"MRI")
+            pet=Image3D(pet,"PET")
+            mri.Plot3DViews(i+1)
+            pet.Plot3DViews(i+1)
+    
+    def PlotPairsMidSlice(self, title=""):
         
-        print(arr.shape)
-        plt.imshow(mid_slice, cmap="gray")
-        plt.title(title)
-        plt.axis("off")
-        plt.show()
-    def PlotPairsSliceID(self, sliceId,title=""):
+        for i, (mri, pet) in enumerate( self.dataset):
+            mri=Image3D(mri,"MRI")
+            pet=Image3D(pet,"PET")
 
-        # FORCE conversion ONLY ONCE
-        mri=self.convert_to_NumPy(self.MRI)
-        pet=self.convert_to_NumPy(self.PET)
+            mri_s, mri_idx = mri.GetMidSlice()
+            pet_s, pet_idx = pet.GetMidSlice()
+            pair=PairImage2D(mri_s,pet_s,i+1)
+            pair.Plot2DPairs()
+    def PlotPairsSliceID(self,SliceId, title=""):
+        for i,(mri,pet) in enumerate(self.dataset):
+            mri=Image3D(mri)
+            pet=Image3D(pet)
 
-        print("MRI shape:", mri.shape)
-        print("PET shape:", pet.shape)
-
-        mri_s, mri_idx = self.get_slice(mri, sliceId)
-        pet_s, pet_idx = self.get_slice(pet, sliceId)
-        
-    
-
-        plt.figure(figsize=(10,5))
-
-        plt.subplot(1,2,1)
-        plt.imshow(mri_s, cmap="gray" )
-        plt.title(f"MRI (slice {mri_idx})")
-        plt.axis("off")
-
-        plt.subplot(1,2,2)
-        plt.imshow(pet_s, cmap="gray" )
-        plt.title(f"PET (slice {pet_idx})")
-        plt.axis("off")
-
-        plt.suptitle(title)
-        plt.show()
-
-class ImageInfo():
-    def __init__(self,image,type=""):
-        self.image=image
-        self.type=type
-    def Image_Info(self):
-        self.GetOrientartion()
-        self.GetOrigin()
-        self.GetSpacing()
-        self.GetDirection()     
-    def GetOrientartion(self):
-        orientation = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(self.image.GetDirection())
-        print("Detected "+self.type+" Image Orientartion:", orientation)                                                                
-    def GetOrigin(self):
-        origin= self.image.GetOrigin()
-        print("Detected "+self.type+" Image Origin:", origin)
-    def GetSpacing(self):
-        spacing=self.image.GetSpacing()
-        print("Detected "+self.type+" Image Spacing:", spacing)
-    def GetDirection(self):
-        direction=self.image.GetDirection()
-        print("Detected "+self.type+" Image Direction:",direction)
- 
-    def filter(self):
-        image = sitk.Median(self.image, [3, 3, 3]) 
-        image = sitk.DiscreteGaussian(image, variance=1.0)
-        return image
-    def GetDicomImageSize(self):
-
-     
-        # optional but recommended
-        image = sitk.DICOMOrient( self.image, "LPS")
-
-        # convert to numpy (z, y, x)
-        arr = self.ConvertToNumpy(image)
-
-        # number of slices
-        z = arr.shape[0]
-        y = arr.shape[1]
-        x = arr.shape[2]
-
-        print("Shape (z, y, x):", arr.shape)
-        print("Number of slices (z):", z)
-
-        return image, arr
-    
-class Visualizer():
-    def __init__(self,dataset,index=None):
-        self.dataset=dataset   
-        self.data = self.dataset if index is None else self.dataset[:index]
-    def Plot2DPairs(self):
-        for i,(mri_img, pet_img) in enumerate(self.data):
-            # FORCE conversion ONLY ONCE
-            mri=self.ConvertToNumpy(mri_img)  #MRI
-            pet=self.ConvertToNumpy(pet_img)  #PET
-
-            plt.figure(figsize=(10,5))
-
-            plt.subplot(1,2,1)
-            plt.imshow(mri, cmap="gray" )
-            plt.title(f"MRI")
-            plt.axis("off")
-
-            plt.subplot(1,2,2)
-            plt.imshow(pet, cmap="gray" )
-            plt.title(f"PET")
-            plt.axis("off")
-
-            plt.suptitle(f"Plot 2D Pairs Subject({i+1})")
-            plt.show()
-    def PlotHist(self):
-        for i, (mri_img, pet_img) in enumerate(self.data):
-
-            mri = self.ConvertToNumpy(mri_img).flatten()
-            pet = self.ConvertToNumpy(pet_img).flatten()
-
-            # optional cleanup (recommended)
-            plt.figure(figsize=(10, 5))
-
-            plt.subplot(1, 2, 1)
-            plt.hist(mri, bins=100)
-            plt.title("MRI")
-            plt.xlabel("Intensity")
-            plt.ylabel("Voxel Count")
-
-            plt.subplot(1, 2, 2)
-            plt.hist(pet, bins=100)
-            plt.title("PET")
-            plt.xlabel("Intensity")
-            plt.ylabel("Voxel Count")
-
-            plt.suptitle(f"Subject {i+1}")
-            plt.show()
-    def PlotHist2(self):
-        for i, (mri_img, pet_img) in enumerate(self.data):
-
-            mri = self.ConvertToNumpy(mri_img).flatten()
-            pet = self.ConvertToNumpy(pet_img).flatten()
-            counts_mri, bins_mri = np.histogram(mri, bins=100)
-            max_idx_mri = np.argmax(counts_mri)
-            counts_mri[max_idx_mri] = 0
-
-            counts_pet, bins_pet = np.histogram(pet, bins=100)
-            max_idx_pet = np.argmax(counts_pet)
-            counts_pet[max_idx_pet] = 0
-            # optional cleanup (recommended)
-            plt.figure(figsize=(10, 5))
-
-            plt.subplot(1, 2, 1)
-            plt.bar(bins_mri[:-1], counts_mri, width=np.diff(bins_mri))
-            plt.title("MRI")
-            plt.xlabel("Intensity")
-            plt.ylabel("Voxel Count")
-
-            plt.subplot(1, 2, 2)
-            plt.bar(bins_pet[:-1], counts_pet, width=np.diff(bins_pet))
-            plt.title("PET")
-            plt.xlabel("Intensity")
-            plt.ylabel("Voxel Count")
-
-            plt.suptitle(f"Subject {i+1}")
-            plt.show()
-
-          
-            plt.figure()
-            
-            plt.show()
-            #left_idx = max(0, max_bin_idx - 4)
-            #right_idx = min(len(bins)-1, max_bin_idx + 5)
-            #bin_min = bins[left_idx]
-            #bin_max = bins[right_idx]
-            #mask = (Image >= bin_min) & (Image < bin_max)
-            #Image[mask] = 1
-            #arr = sitk.GetArrayFromImage(Image).copy()
-
-            #kernel = np.ones((2,2))
-
-            #count = convolve(arr.astype(np.int32), kernel, mode='constant')
-
-            #filtered = (count > 4).astype(np.uint8)
-            #return Image
-    def GetMinMax(self):
-        for i, (mri_img, pet_img) in enumerate(self.data):
-            mri = self.ConvertToNumpy(mri_img).flatten()
-            pet = self.ConvertToNumpy(pet_img).flatten()
-
-            print("MRI min:", mri.min(), "MRI max:", mri.max())
-            print("PET min:", pet.min(), "PET max:", pet.max())
-    def GetPairsSize(self):
-        for i,(mri_img, pet_img) in enumerate(self.data):
-            # FORCE conversion ONLY ONCE
-            mri=self.ConvertToNumpy(mri_img)  #MRI
-            pet=self.ConvertToNumpy(pet_img)  #PET
-            print("MRI shape:", mri.shape)
-            print("PET shape:", pet.shape)
-    def MaxBinSetOne(self, bins=100):
-      for i, (mri, pet) in enumerate(self.data):
-
-            mri_flat = self.ConvertToNumpy(mri).flatten()
-            pet_flat = self.ConvertToNumpy(pet).flatten()
-
-            # histogram MRI
-            mri_counts, mri_bins = np.histogram(mri_flat, bins=bins)
-            peak = np.argmax(mri_counts)
-
-            left = max(0, 0)
-            right = min(len(mri_counts) - 1, peak + 1)
-
-            mri_min = mri_bins[left]
-            mri_max = mri_bins[right + 1]
-
-            mri[(mri >= mri_min) & (mri < mri_max)] = 1
-
-            # histogram PET
-            pet_counts, pet_bins = np.histogram(pet_flat, bins=bins)
-            pet_max_bin = np.argmax(pet_counts)
-
-            pet_min = pet_bins[pet_max_bin]
-            pet_max = pet_bins[pet_max_bin + 1]
-
-            pet[(pet >= pet_min) & (pet < pet_max)] = 1
-    def ConvertToNumpy(self,img):
-        if img is None:
-            raise ValueError("Image is None")
-
-        if isinstance(img, np.ndarray):
-            return img
-
-        return sitk.GetArrayFromImage(img)
-    
-    def Set_Image_Info(self):
-        self.MRI.SetOrigin(self.PET.GetOrigin())
-        self.MRI.SetSpacing(self.PET.GetSpacing())
-        self.MRI.SetDirection(self.PET.GetDirection())
-    def MinMaxNormPairs(self) :
-        new_data = []
-
-        for mri_img, pet_img in self.data:
-            mri = self.ConvertToNumpy(mri_img)
-            pet = self.ConvertToNumpy(pet_img)
-
-            mri = self.minmax_normalize(mri)
-            pet = self.minmax_normalize(pet)
-
-            new_data.append((mri, pet))
-
-        self.data = new_data
-    def GaussianNormPairs(self) :
-        new_data = []
-
-        for mri_img, pet_img in self.data:
-            mri = self.ConvertToNumpy(mri_img)
-            pet = self.ConvertToNumpy(pet_img)
-
-            mri = self.gaussian_normalize(mri)
-            pet = self.gaussian_normalize(pet)
-
-            new_data.append((mri, pet))
-
-        self.data = new_data
-    def minmax_normalize(self,img):
-            img = img.astype(np.float32)
-
-            min_val = np.min(img)
-            max_val = np.max(img)
-
-            normalized = (img - min_val) / (max_val - min_val + 1e-8)
-
-            return normalized
-    def gaussian_normalize(self,img):
-        img = img.astype(np.float32)
-
-        mean = np.mean(img)
-        std = np.std(img)
-
-        normalized = (img - mean) / (std + 1e-8)
-
-        return normalized
+            mri_s, mri_idx = mri.GetSliceId(SliceId)
+            pet_s, pet_idx = pet.GetSliceId(SliceId)
+            pair=PairImage2D(mri_s,pet_s,i)
+            pair.Plot2DPairs()
     def Skip(self):
         skip_indices = {36,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67, 69, 
                         70, 71, 72, 82, 83,84, 91, 104, 106, 111, 112, 113, 114, 118,
@@ -1172,23 +747,93 @@ class Visualizer():
             if i not in skip_indices
         ]
         print(len(self.data))
+    def skull_strip_remove_neck(input_img, output_img, frac=0.3):
+            cmd = [
+                "bet",
+                input_img,
+                output_img,
+                "-R",   # robust center estimation
+                "-B",   # bias field + better cleanup
+                "-f", str(frac),  # fractional intensity (try 0.25–0.4)
+                "-g", "0",         # vertical gradient (important for neck removal)
+                "-m"   # also output mask
+            ]
+            subprocess.run(cmd, check=True)
+    def GetDataset(self):
+        return self.dataset
+class Visualizer():
+    def __init__(self,dataset,index=None):
+        self.dataset=dataset   
+        self.data = self.dataset if index is None else self.dataset[:index]
+    def do(self):
+        for i,(mri_img, pet_img) in enumerate(self.data):
+            # self.MaxBinSetOne()
+         
+            p=PairImage2D(mri_img, pet_img,i)
+            p.GetMinMax()
+            p.MinMaxNormPairs()
+            p.GaussianNormPairs()
+            p.GetMinMax()
+            p.Plot2DPairs()
+            # p.PlotHist()
+            # p.PlotHist2()
+    def GetPairsSize(self):
+            pair=PairImage2D(self.data[0][0],self.data[0][1])
+            pair.GetPairsSize()
+    def MaxBinSetOne(self):
+        self.MaxBinSet(1)
+    def MaxBinSetZero(self):
+        self.MaxBinSet(0)
+    def MaxBinSet(self,setValue):
+        new_data = []
+        for mri, pet in self.data:
+            mri= self.CalculateMaxBinFromHistogram(mri,setValue)
+            pet= self.CalculateMaxBinFromHistogram(pet,setValue)
+            new_data.append((mri, pet))
+
+        self.data = new_data  
+    def Skip(self):
+        skip_indices = {2,3,6,7,
+                        12,15,16,
+                        23,
+                        34,44,51,52,53,54,55,56,58,59,
+                        60,62,66,67,68,
+                        70,71,72,73,78,
+                        96,100,102,107,112,
+                        123,129,130,131,132,133,134,135,136,138,
+                        139,140,141,142,143,144,148,
+                        159,181,192,201,202,203,204,206,207,208,209,
+                        211,212
+        }
+
+        print(len(skip_indices))
+                        # 36,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67, 69, 
+                        # 70, 71, 72, 82, 83,84, 91, 104, 106, 111, 112, 113, 114, 118,
+                        # 120, 122, 123, 125, 126, 128, 129, 130,138,139,140,141,142,143, 147, 149, 153, 155, 156, 157,
+                        # 160, 171, 172, 177, 178, 180, 184, 188, 189, 192, 193, 194, 195,197,
+                        # 206, 213} 
+        self.data = [
+            item for i, item in enumerate(self.data)
+            if i not in skip_indices
+        ]
+        print(len(self.data))
     def GetDataset(self):
         return self.data
     def PlotPairImageAndHist(self):
         for i, (mri_img, pet_img) in enumerate(self.data):
 
-            mri = self.ConvertToNumpy(mri_img)
-            pet = self.ConvertToNumpy(pet_img)
+            mri = Image2D(mri_img,"MRI")
+            pet = Image2D(pet_img,"PET")
 
-            mri_flat = mri.flatten()
-            pet_flat = pet.flatten()
+            mri_flat = mri.ConvertToNumpy().flatten()
+            pet_flat = pet.ConvertToNumpy().flatten()
              # MRI histogram
-            counts_mri, bins_mri = np.histogram(mri, bins=100)
+            counts_mri, bins_mri = np.histogram(mri_flat, bins=100)
             max_idx_mri = np.argmax(counts_mri)
             counts_mri[max_idx_mri] = 0   # skip max bin
 
             # PET histogram
-            counts_pet, bins_pet = np.histogram(pet, bins=100)
+            counts_pet, bins_pet = np.histogram(pet_flat, bins=100)
             max_idx_pet = np.argmax(counts_pet)
             counts_pet[max_idx_pet] = 0   # skip max bin
             plt.figure(figsize=(20, 4))
@@ -1222,17 +867,261 @@ class Visualizer():
             plt.suptitle(f"Subject {i+1}")
             plt.tight_layout()
             plt.show()
+class DatasetBuilder():
+    def __init__(self,dataset,output=""):
+        self.output = output   
+        self.dataset=dataset
+    def SaveDatasetAsNII(self): 
+        for subjectId, (mri, pet) in enumerate(self.dataset):
 
+            subject_folder = os.path.join(self.output, str(subjectId+1))
+            os.makedirs(subject_folder, exist_ok=True)
 
+            sitk.WriteImage(mri, os.path.join(subject_folder, "mri.nii"))
+            sitk.WriteImage(pet, os.path.join(subject_folder, "pet.nii"))
 
+        print("Saving NIfTI 3D dataset finalized.")
+    def Save2DdatasetAsPNGimage(self): 
+        Image_folder = os.path.join(self.output, "Image")
+        os.makedirs(Image_folder, exist_ok=True)
+        for subjectId, (mri, pet) in enumerate(self.dataset):
+            sitk.WriteImage(mri, f"mri_{subjectId+1}.png")
+            sitk.WriteImage(pet, f"pet_{subjectId+1}.png")
 
+        print("Saving PNG 2D dataset finalized.")
+    def Save3DViewsOf3DdatasetAsPNGimage(self):
+        print(len(self.dataset))
+        for subjectId, (mri, pet) in enumerate( self.dataset):
+            mri=Image3D(mri,"MRI")
+            pet=Image3D(pet,"PET")
+            # mri.Save3DViews(i+1)
+            # pet.Save3DViews(i+1)
+class PairImage2D():
+    def __init__(self,mri_img, pet_img,index):
+        self.mri=Image2D(mri_img,"MRI")
+        self.pet=Image2D(pet_img,"PET")
+        self.mriNumpy = self.mri.ConvertToNumpy()
+        self.petNumpy = self.pet.ConvertToNumpy()
+        self.index=index
+    def GetMinMax(self):
+        self.mri.GetMinMax()
+        self.pet.GetMinMax()
+    def Plot2DPairs(self):
 
+        plt.figure(figsize=(10,5))
 
+        plt.subplot(1,2,1)
+        plt.imshow(self.mriNumpy, cmap="gray" )
+        plt.title(f"MRI")
+        plt.axis("off")
 
+        plt.subplot(1,2,2)
+        plt.imshow(self.petNumpy, cmap="gray" )
+        plt.title(f"PET")
+        plt.axis("off")
 
+        plt.suptitle(f"Plot 2D Pairs Subject({self.index+1})")
+        plt.show()
+    def PlotHist(self):
 
+        mri=self.mriNumpy.flatten()  #MRI
+        pet=self.petNumpy.flatten()  #PET
 
+        # optional cleanup (recommended)
+        plt.figure(figsize=(10, 5))
 
+        plt.subplot(1, 2, 1)
+        plt.hist(mri, bins=100)
+        plt.title("MRI")
+        plt.xlabel("Intensity")
+        plt.ylabel("Voxel Count")
+
+        plt.subplot(1, 2, 2)
+        plt.hist(pet, bins=100)
+        plt.title("PET")
+        plt.xlabel("Intensity")
+        plt.ylabel("Voxel Count")
+
+        plt.suptitle(f"Subject {self.index+1}")
+        plt.show()
+    def PlotHist2(self):
+
+        mri=self.mriNumpy.flatten()  #MRI
+        pet=self.petNumpy.flatten()  #PET
+
+        counts_mri, bins_mri = np.histogram(mri, bins=100)
+        counts_pet, bins_pet = np.histogram(pet, bins=100)
+
+        threshold = 400
+
+        mask_mri = counts_mri <= threshold
+        mask_pet = counts_pet <= threshold
+
+        centers_mri = (bins_mri[:-1] + bins_mri[1:]) / 2
+        centers_pet = (bins_pet[:-1] + bins_pet[1:]) / 2
+
+        width_mri = bins_mri[1] - bins_mri[0]
+        width_pet = bins_pet[1] - bins_pet[0]
+
+        plt.figure(figsize=(10,5))
+
+        plt.subplot(1,2,1)
+        plt.bar(
+            centers_mri[mask_mri],
+            counts_mri[mask_mri],
+            width=width_mri
+        )
+        plt.title("MRI")
+        plt.xlabel("Intensity")
+        plt.ylabel("Voxel Count")
+
+        plt.subplot(1,2,2)
+        plt.bar(
+            centers_pet[mask_pet],
+            counts_pet[mask_pet],
+            width=width_pet
+        )
+        plt.title("PET")
+        plt.xlabel("Intensity")
+        plt.ylabel("Voxel Count")
+
+        plt.suptitle(f"Subject {self.index+1}")
+        plt.tight_layout()
+        plt.show()
+        #left_idx = max(0, max_bin_idx - 4)
+        #right_idx = min(len(bins)-1, max_bin_idx + 5)
+        #bin_min = bins[left_idx]
+        #bin_max = bins[right_idx]
+        #mask = (Image >= bin_min) & (Image < bin_max)
+        #Image[mask] = 1
+        #arr = sitk.GetArrayFromImage(Image).copy()
+
+        #kernel = np.ones((2,2))
+
+        #count = convolve(arr.astype(np.int32), kernel, mode='constant')
+
+        #filtered = (count > 4).astype(np.uint8)
+        #return Image             
+    def MinMaxNormPairs(self) :
+        self.mriNumpy = self.mri.MinMaxNormalize()
+        self.petNumpy = self.pet.MinMaxNormalize()
+    def GaussianNormPairs(self) :
+        self.mriNumpy = self.mri.GaussianNormalize()
+        self.petNumpy = self.pet.GaussianNormalize()
+    def SetPetInfoIntoMri(self):
+        self.mri.SetOrigin(self.pet.GetOrigin())
+        self.mri.SetSpacing(self.pet.GetSpacing())
+        self.mri.SetDirection(self.pet.GetDirection())
+    def GetPairsSize(self):
+        self.mri.GetSize()
+        self.pet.GetSize()
+class Image2D(ImageProcessor):
+    def __init__(self,image,name):
+        super().__init__(self)
+        self.image=image
+        self.name=name
+    def GetSize(self):
+        self.image.ConvertToNumpy()
+        print(f"{self.name} shape:",  self.image.shape)
+    def GetMinMax(self):
+        image = self.ConvertToNumpy().flatten()
+        print(f"{self.name} min:", image.min(), f"{self.name} max:", image.max())
+    def MinMaxNormalize(self):
+        self.image = self.image.astype(np.float32)
+
+        min_val = np.min(self.image)
+        max_val = np.max(self.image)
+
+        normalized = (self.image - min_val) / (max_val - min_val + 1e-8)
+
+        return normalized
+    def GaussianNormalize(self):
+        self.image = self.image.astype(np.float32)
+
+        mean = np.mean(self.image)
+        std = np.std(self.image)
+        print("mean",mean)
+        print("std",std)
+        normalized = (self.image - mean) / (std + 1e-8)
+
+        return normalized
+    def ConvertToNumpy(self):
+        return super().ConvertToNumpy() 
+class Image3D(ImageProcessor):
+    def __init__(self,image,name):
+        super().__init__(self)
+        self.image=image
+        self.name=name
+        self.numpyImage=self.ConvertToNumpy()
+    def Plot3DViews(self,subject="",subjectId="",pair="",path="",save=False):
+       
+        z, y, x = self.numpyImage.shape
+        # print(self.numpyImage.shape)
+        plt.figure(figsize=(12,4))
+
+        plt.subplot(1,3,1)
+        plt.imshow(self.numpyImage[z//2], cmap='gray')
+        plt.title("Axial")
+
+        plt.subplot(1,3,2)
+        plt.imshow(self.numpyImage[:, y//2, :], cmap='gray')
+        plt.title("Coronal")
+
+        plt.subplot(1,3,3)
+        plt.imshow(self.numpyImage[:, :, x//2], cmap='gray')
+        plt.title("Sagittal")
+
+        plt.suptitle(f"Subject({subject}):{subjectId}, Pair({pair})")  
+        save_path = os.path.join(path,rf"architecture_batch_comparison.png")
+        if save:
+            plt.savefig(save_path,dpi=300,bbox_inches="tight")
+        plt.show()
+
+    def GetMidSlice(self):
+        midIDNumber = self.numpyImage.shape[0] // 2
+        slice = self.numpyImage[midIDNumber]
+        return slice, midIDNumber   
+    def GetSliceId(self,sliceId):
+        if sliceId < 0 or sliceId >= self.numpyImage.shape[0]:
+            raise ValueError("sliceId out of range")
+        return self.numpyImage[sliceId],sliceId
+    def PlotMiddleSlice(self, title=""):
+        print("ITK size:", self.image.GetSize())
+
+        arr = self.ConvertToNumpy(self.image)
+        arr = np.transpose(arr, (1, 2, 0))
+        mid_slice = arr[arr.shape[0] // 2]
+        
+        print(arr.shape)
+        plt.imshow(mid_slice, cmap="gray")
+        plt.title(title)
+        plt.axis("off")
+        plt.show()
+    def ConvertToNumpy(self):
+        return super().ConvertToNumpy()          
+class MNI(Image3D):
+    def __init__(self,MNI_Root):
+        self.MNI_Root=MNI_Root
+        self.MNI_Template=self.LoadMNIimage()
+        super().__init__( self.MNI_Template,"MNI")
+    def LoadMNIimage(self):
+        MNI_Template=self.LoadTemplateImageFileMNI()
+        return MNI_Template
+    def LoadTemplateImageFileMNI(self):
+        MNI_Template = sitk.ReadImage(self.MNI_Root)
+        MNI_Template = sitk.DICOMOrient(MNI_Template, "LAI")
+        MNI_Template = sitk.Cast(MNI_Template, sitk.sitkFloat32) 
+        MNI_Template.SetDirection([-1,0,0, 0,-1,0, 0,0,-1])
+        return MNI_Template
+    def PrintINfO(self):
+        print("Dimension:", self.MNI_Template.GetDimension())
+        print("Size:", self.MNI_Template.GetSize())
+        print("Spacing:", self.MNI_Template.GetSpacing())
+        print("Origin:", self.MNI_Template.GetOrigin())
+        print("Direction:", self.MNI_Template.GetDirection())
+    def Load_png(self):
+        img = plt.imread(self.MNI_Root)
+        return img
 
 
 

@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+
+# Medical imaging / datasets
+*.nii
+*.nii.gz
+*.dcm

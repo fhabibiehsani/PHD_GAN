@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 #-----------------------------------------------------------------
-class ConvBlock(nn.Module):
+class EncoderBlock(nn.Module):
     def __init__(self, in_c, out_c):
         super().__init__()
         self.block = nn.Sequential(
@@ -13,7 +13,7 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 #-----------------------------------------------------------------
-class DeconvBlock(nn.Module):
+class DecoderBlock(nn.Module):
     def __init__(self, in_c, out_c):
         super().__init__()
         self.block = nn.Sequential(
@@ -27,28 +27,27 @@ class DeconvBlock(nn.Module):
 #-----------------------------------------------------------------
 class Generator(nn.Module):
 
-    def __init__(self):
+    def __init__(self,in_channels=1, out_channels=1):
         super().__init__()
 
         # -------- Encoder --------
-        self.e1 = ConvBlock(1, 64)
-        self.e2 = ConvBlock(64, 128)
-        self.e3 = ConvBlock(128, 256)
-        self.e4 = ConvBlock(256, 256)
-        self.e5 = ConvBlock(256, 512)
-        self.e6 = ConvBlock(512, 512)
-        self.e7 = ConvBlock(512, 512)
+        self.e1 = EncoderBlock(in_channels, 64)
+        self.e2 = EncoderBlock(64, 128)
+        self.e3 = EncoderBlock(128, 256)
+        self.e4 = EncoderBlock(256, 256)
+        self.e5 = EncoderBlock(256, 512)
+        self.e6 = EncoderBlock(512, 512)
+        self.e7 = EncoderBlock(512, 512)
 
         # -------- Decoder --------
-        self.d1 = DeconvBlock(512, 512)
-        self.d2 = DeconvBlock(512 + 512, 512)
-        self.d3 = DeconvBlock(512 + 512, 512)
-        self.d4 = DeconvBlock(512 + 256, 256)
-        self.d5 = DeconvBlock(256 + 256, 128)
-        self.d6 = DeconvBlock(128 + 128, 64)
+        self.d1 = DecoderBlock(512, 512)
+        self.d2 = DecoderBlock(512 + 512, 512)
+        self.d3 = DecoderBlock(512 + 512, 256)
+        self.d4 = DecoderBlock(256 + 256, 256)
+        self.d5 = DecoderBlock(256 + 256, 128)
+        self.d6 = DecoderBlock(128 + 128, 64)
 
-        self.final = nn.ConvTranspose2d(64 + 64,1,kernel_size=5,stride=2,padding=2,output_padding=1)
-
+        self.final = nn.ConvTranspose2d(64 + 64,out_channels,kernel_size=5,stride=2,padding=2,output_padding=1)
         self.tanh = nn.Tanh()
 
     def forward(self, x):
@@ -64,13 +63,11 @@ class Generator(nn.Module):
 
         # Decoder + Skip connections
         d1 = self.d1(e7)
-
         d2 = self.d2(torch.cat([d1, e6], dim=1))
         d3 = self.d3(torch.cat([d2, e5], dim=1))
         d4 = self.d4(torch.cat([d3, e4], dim=1))
         d5 = self.d5(torch.cat([d4, e3], dim=1))
         d6 = self.d6(torch.cat([d5, e2], dim=1))
-
         out = self.final(torch.cat([d6, e1], dim=1))
 
         return self.tanh(out)
