@@ -1,11 +1,13 @@
 import os
+from PIL import Image
 import cv2
 import subprocess
 import numpy as np
 import nibabel as nib
 import SimpleITK as sitk
 import matplotlib.pyplot as plt
-
+from pathlib import Path
+from collections import defaultdict
 from scipy.ndimage import convolve
 np.set_printoptions(threshold=np.inf)
 class ImageInfo():
@@ -84,6 +86,19 @@ class ImageProcessor():
             return sitk.GetArrayFromImage(self.image)
 
         raise TypeError(f"Unsupported type: {type(self.image)}")
+    def HistogramMatch(self, image, reference):
+        matcher = sitk.HistogramMatchingImageFilter()
+
+        matcher.SetNumberOfHistogramLevels(256)
+        matcher.SetNumberOfMatchPoints(50)
+        matcher.ThresholdAtMeanIntensityOn()
+
+        matched = matcher.Execute(
+            image,
+            reference
+        )
+
+        return matched
 class ImageLoader():
     def __init__(self,folder ,fmt, mode):
         self.folder=folder
@@ -118,13 +133,12 @@ class ImageLoader():
         except:
             return None
         
-        
         image = sitk.DICOMOrient(image, "RAI")      #Orientation : RAS   #LPS
         image=self.ConvertImageToFloat32(image)     #Type conversion
         image = sitk.RescaleIntensity(image, 0, 1)
         image = sitk.DiscreteGaussian(image, variance=1.0)
         original = image
-        arr = sitk.GetArrayFromImage(image)              #Normalization
+        arr = sitk.GetArrayFromImage(image)             
         arr = arr.astype(np.float32)
         arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8) 
         arr = np.where(arr < 0.01, 0, arr)
@@ -175,15 +189,19 @@ class ImageLoader():
 
         # take first frame
         arr = vol[-1]
-        arr = np.flip(arr, axis=1)
+        arr = np.flip(arr, axis=1)  #This flip images
+        arr = arr.astype(np.float32)
         arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8) 
         arr = np.where(arr < 0.01, 0, arr)
         
         # convert to SimpleITK
         image = sitk.GetImageFromArray(arr)
         image = sitk.RescaleIntensity(image, 0, 1)
-        image = sitk.DICOMOrient(image, "RPS")
-        if "30_min_3D_FDG_4i_16s" in v_files[0]:
+        image = sitk.DiscreteGaussian(image, variance=1.0)
+        image = sitk.DICOMOrient(image, "RPS")  
+        # todo
+        if ("30_min_3D_FDG" in v_files[0] or "Dynamic_2_FDG" in v_files[0]  or  "30MIN_3D_FDG" in v_files[0] or  "ADNI_FDG_ITER_img" in v_files[0]): #
+            # print(v_files)
             image.SetSpacing((2.1, 2.1, 2.4))
         else:
             image.SetSpacing((2.6, 2.6, 2.4))
@@ -229,7 +247,8 @@ class ImageLoader():
         # convert to SimpleITK
         image = sitk.GetImageFromArray(arr)
         image = sitk.RescaleIntensity(image, 0, 1)
-        image = sitk.DICOMOrient(image, "RPI")
+        image = sitk.DiscreteGaussian(image, variance=1.0)
+        image = sitk.DICOMOrient(image, "RPS")
         image.SetSpacing((1.2, 1.2,1.2))
         image.SetOrigin((128.0, 128.0, 75.6))
         image.SetDirection([-1,0,0,0,-1,0,0,0,-1])
@@ -243,7 +262,7 @@ class ImageLoader():
             image.SetDirection([-1,0, 0,-1])
         image = self.ConvertImageToFloat32(image)
         image = sitk.RescaleIntensity(image, 0, 1)
-        return image, 1
+        return (image, 1)
     def IsDynamicPETImage(self):
         reader = sitk.ImageSeriesReader()
         dicom_names = reader.GetGDCMSeriesFileNames(self.folder)
@@ -352,9 +371,14 @@ class DatasetExplorer():
         return mri_dict,pet_dict
   
     def FindAllFileTypes(self):
+        extensions_Pet=self._FindAllTypes(self.pet_root,"PET")
+        self._CountDifferentFileTypes(self.pet_root,"PET")
+        extensions_mri=self._FindAllTypes(self.mri_root,"MRI")
+        self._CountDifferentFileTypes(self.mri_root,"MRI")
+    def _FindAllTypes(self,path,name):
         extensions = {}
 
-        for root, _, files in os.walk(self.pet_root):
+        for root, _, files in os.walk(path):
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
 
@@ -363,17 +387,17 @@ class DatasetExplorer():
 
                 extensions[ext] = extensions.get(ext, 0) + 1
 
-        print("File types:")
+        print(f"{name} File types:")
         for k, v in sorted(extensions.items(), key=lambda x: -x[1]):
             print(k, ":", v)
-
+        print("--------------------")
         return extensions
-    def CountDifferentFileTypes(self):
+    def _CountDifferentFileTypes(self,path,name):
         dicom_folders = set()
         v_folders = set()
         i_folders = set()
         nii_folders=set()
-        for root, _, files in os.walk(self.pet_root):
+        for root, _, files in os.walk(path):
 
             has_dicom = False
             has_v = False
@@ -404,12 +428,14 @@ class DatasetExplorer():
             if has_nii:
                 nii_folders.add(root)
 
-        print("Results:")
+        print(f"{name} Folders Counts:")
         print("DICOM folders:", len(dicom_folders))
         print("V folders:", len(v_folders))
         print("i folders:", len(i_folders))
-        print("nii folders:", len(i_folders))
+        print("nii folders:", len(nii_folders))
         print("Total medical folders:", len(dicom_folders) + len(v_folders)+ len(i_folders)+ len(nii_folders))
+        print("--------------------")
+
     def CheckAnyUniqueImageSize(self, dtype='>i2'):
         size_counts = {}   
         examples = {}     
@@ -508,7 +534,6 @@ class DatasetLoader():
         super().__init__()
         self.mri_dict = mri_dict
         self.pet_dict = pet_dict
-    
     def LoadDataset(self,number=None):
       
         dataset = []
@@ -516,22 +541,34 @@ class DatasetLoader():
         if number is not None:
             items = items[:number]
         print(len(items))
+        pair_counter = defaultdict(int)
+        Info = []
         for (mri_folder, mri_fmt), (pet_folder, pet_fmt) in items:
-            
+
             mriImageLoader=ImageLoader(mri_folder, mri_fmt, "mri")
             petImageLoader=ImageLoader(pet_folder, pet_fmt, "pet")
-            
-
-            # print("MRI Folder:", mri_folder)
-            # print("MRI Format:", mri_fmt)
-
-            # print("PET Folder:", pet_folder)
-            # print("PET Format:", pet_fmt)
 
             mri, mri_frames = mriImageLoader.LoadImages()
             pet, pet_frames = petImageLoader.LoadImages()
+
             dataset.append((mri, pet))
-        return dataset
+            Info.append(self._FindSubjectAndPairs(pair_counter,mri_folder))
+        return (dataset,Info)
+    def _FindSubjectAndPairs(self,pair_counter,mri_folder):
+        # parts = Path(mri_folder).parts
+        # adni_index = parts.index("ADNI")
+
+        # subject = parts[adni_index + 1]
+        # pair = parts[adni_index + 2]
+
+        # # Start from 1 for each subject
+        # pair_counter[subject] += 1
+        # pair_number = pair_counter[subject]
+
+        # # print(subject, pair_number)
+        # return (subject, pair_number)
+        return ("",1)
+ 
     def Load_nii_Dataset(self,input_nii):
 
         for subjectCounter,subject in  enumerate(os.listdir(input_nii)):
@@ -613,8 +650,9 @@ class DatasetLoader():
                 # To Do
                 print("Loaded:", subject, pair)  
 class Preprocessor():
-    def __init__(self,dataset,index=None):
+    def __init__(self,dataset,Info,index=None):
         self.dataset = dataset if index is None else dataset[:index]
+        self.Info=Info
         #3D Dataset
     def Extract2Ddatasetfrom3DdatasetperSliceIds(self,sliceIds):
             new2Ddataset=[]
@@ -627,21 +665,16 @@ class Preprocessor():
         for mri_img, pet_img in self.dataset:
             mri=Image3D(mri_img,"MRI")
             pet=Image3D(pet_img,"PET")
-            # mri= mri.ConvertToNumpy()
-            # pet= pet.ConvertToNumpy()
 
             if sliceId is None:
                 mri2D,mriSliceId=mri.GetMidSlice()
                 pet2D,petSliceId=pet.GetMidSlice()
-                # mri2D=self.normalizeTanh(mri2D)
-                # pet2D=self.normalizeTanh(pet2D)
             else:
                 # for sliceId in sliceIds:
                     mri2D,mriSliceId=mri.GetSliceId(sliceId)
                     pet2D,petSliceId=pet.GetSliceId(sliceId)
-                    # mri2D=self.normalizeTanh(mri2D)
-                    # pet2D=self.normalizeTanh(pet2D)
-
+            mri2D = sitk.GetImageFromArray(mri2D)
+            pet2D = sitk.GetImageFromArray(pet2D)
             new2Ddataset.append((mri2D, pet2D))   
 
         return new2Ddataset
@@ -711,42 +744,29 @@ class Preprocessor():
 
     def PlotPairs3DViews(self):
         print(len(self.dataset))
-        for i, (mri, pet) in enumerate( self.dataset):
+        for i, ((mri, pet), (SubjectId, pairNumber)) in enumerate(zip(self.dataset, self.Info)):
             mri=Image3D(mri,"MRI")
             pet=Image3D(pet,"PET")
-            mri.Plot3DViews(i+1)
-            pet.Plot3DViews(i+1)
+            mri.Plot3DViews(i+1,SubjectId,pairNumber)
+            pet.Plot3DViews(i+1,SubjectId,pairNumber)
     
-    def PlotPairsMidSlice(self, title=""):
-        
-        for i, (mri, pet) in enumerate( self.dataset):
+    def PlotPairsMidSlice(self):
+        for i, ((mri, pet), (SubjectId, pairNumber)) in enumerate(zip(self.dataset, self.Info)):
             mri=Image3D(mri,"MRI")
             pet=Image3D(pet,"PET")
-
             mri_s, mri_idx = mri.GetMidSlice()
             pet_s, pet_idx = pet.GetMidSlice()
             pair=PairImage2D(mri_s,pet_s,i+1)
-            pair.Plot2DPairs()
-    def PlotPairsSliceID(self,SliceId, title=""):
-        for i,(mri,pet) in enumerate(self.dataset):
+            pair.Plot2DPairs(i+1,SubjectId,pairNumber)
+    def PlotPairsSliceID(self,SliceId):
+         for i, ((mri, pet), (SubjectId, pairNumber)) in enumerate(zip(self.dataset, self.Info)):
             mri=Image3D(mri)
             pet=Image3D(pet)
-
             mri_s, mri_idx = mri.GetSliceId(SliceId)
             pet_s, pet_idx = pet.GetSliceId(SliceId)
-            pair=PairImage2D(mri_s,pet_s,i)
-            pair.Plot2DPairs()
-    def Skip(self):
-        skip_indices = {36,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67, 69, 
-                        70, 71, 72, 82, 83,84, 91, 104, 106, 111, 112, 113, 114, 118,
-                        120, 122, 123, 125, 126, 128, 129, 130,138,139,140,141,142,143, 147, 149, 153, 155, 156, 157,
-                        160, 171, 172, 177, 178, 180, 184, 188, 189, 192, 193, 194, 195,197,
-                        206, 213} 
-        self.data = [
-            item for i, item in enumerate(self.data)
-            if i not in skip_indices
-        ]
-        print(len(self.data))
+            pair=PairImage2D(mri_s,pet_s,i+1)
+            pair.Plot2DPairs(i+1,SubjectId,pairNumber)
+
     def skull_strip_remove_neck(input_img, output_img, frac=0.3):
             cmd = [
                 "bet",
@@ -765,33 +785,32 @@ class Visualizer():
     def __init__(self,dataset,index=None):
         self.dataset=dataset   
         self.data = self.dataset if index is None else self.dataset[:index]
+        self.reference_mri = self.data[0][0]
+        self.reference_pet = self.data[0][1]
     def do(self):
         for i,(mri_img, pet_img) in enumerate(self.data):
-            # self.MaxBinSetOne()
-         
+            # pet_img=pet_img*pet_img
+            # mri_processor = ImageProcessor(mri_img)
+            # pet_processor = ImageProcessor(pet_img)
+            # mri_img = mri_processor.HistogramMatch( mri_img,self.reference_mri)
+            # pet_img = pet_processor.HistogramMatch( pet_img,self.reference_pet)
+            
             p=PairImage2D(mri_img, pet_img,i)
-            p.GetMinMax()
-            p.MinMaxNormPairs()
-            p.GaussianNormPairs()
+            # p.GaussianNormPairs()
+            # p.MaxBinSetZero()
+            # p.PlotHist2()
+            # p.MinMaxNormPairs()
+            # 
             p.GetMinMax()
             p.Plot2DPairs()
-            # p.PlotHist()
             # p.PlotHist2()
+            # p.Plot2DPairs()
+              # Update dataset
+            self.data[i] = ( p.mriNumpy, p.petNumpy )
     def GetPairsSize(self):
             pair=PairImage2D(self.data[0][0],self.data[0][1])
             pair.GetPairsSize()
-    def MaxBinSetOne(self):
-        self.MaxBinSet(1)
-    def MaxBinSetZero(self):
-        self.MaxBinSet(0)
-    def MaxBinSet(self,setValue):
-        new_data = []
-        for mri, pet in self.data:
-            mri= self.CalculateMaxBinFromHistogram(mri,setValue)
-            pet= self.CalculateMaxBinFromHistogram(pet,setValue)
-            new_data.append((mri, pet))
 
-        self.data = new_data  
     def Skip(self):
         skip_indices = {2,3,6,7,
                         12,15,16,
@@ -876,6 +895,16 @@ class DatasetBuilder():
 
             subject_folder = os.path.join(self.output, str(subjectId+1))
             os.makedirs(subject_folder, exist_ok=True)
+                # Convert NumPy → SimpleITK
+            if isinstance(mri, np.ndarray):
+                mri = sitk.GetImageFromArray(
+                    mri.astype(np.float32)
+                )
+
+            if isinstance(pet, np.ndarray):
+                pet = sitk.GetImageFromArray(
+                    pet.astype(np.float32)
+                )
 
             sitk.WriteImage(mri, os.path.join(subject_folder, "mri.nii"))
             sitk.WriteImage(pet, os.path.join(subject_folder, "pet.nii"))
@@ -896,6 +925,115 @@ class DatasetBuilder():
             pet=Image3D(pet,"PET")
             # mri.Save3DViews(i+1)
             # pet.Save3DViews(i+1)
+class Image3D(ImageProcessor):
+    def __init__(self,image,name):
+        super().__init__(self)
+        self.image=image
+        self.name=name
+        self.numpyImage=self.ConvertToNumpy()
+    def Plot3DViews(self,subject="",subjectId="",pair="",path="",save=False):
+       
+        z, y, x = self.numpyImage.shape
+        # print(self.numpyImage.shape)
+        plt.figure(figsize=(12,4))
+
+        plt.subplot(1,3,1)
+        plt.imshow(self.numpyImage[z//2], cmap='gray')
+        plt.title("Axial")
+
+        plt.subplot(1,3,2)
+        plt.imshow(self.numpyImage[:, y//2, :], cmap='gray')
+        plt.title("Coronal")
+
+        plt.subplot(1,3,3)
+        plt.imshow(self.numpyImage[:, :, x//2], cmap='gray')
+        plt.title("Sagittal")
+
+        plt.suptitle(f"Subject({subject}):{subjectId}, Pair({pair})")  
+        save_path = os.path.join(path,rf"architecture_batch_comparison.png")
+        if save:
+            plt.savefig(save_path,dpi=300,bbox_inches="tight")
+        plt.show()
+
+    def GetMidSlice(self):
+        midIDNumber = self.numpyImage.shape[0] // 2
+        slice = self.numpyImage[midIDNumber]
+        return slice, midIDNumber   
+    def GetSliceId(self,sliceId):
+        if sliceId < 0 or sliceId >= self.numpyImage.shape[0]:
+            raise ValueError("sliceId out of range")
+        return self.numpyImage[sliceId],sliceId
+    def PlotMiddleSlice(self,subject="",subjectId="",pair=""):
+        print("ITK size:", self.image.GetSize())
+
+        arr = self.ConvertToNumpy(self.image)
+        arr = np.transpose(arr, (1, 2, 0))
+        mid_slice = arr[arr.shape[0] // 2]
+        
+        print(arr.shape)
+        plt.imshow(mid_slice, cmap="gray")
+        plt.title(f"Subject({subject}):{subjectId}, Pair({pair})")
+        plt.axis("off")
+        plt.show()
+    def ConvertToNumpy(self):
+        return super().ConvertToNumpy()          
+class MNI(Image3D):
+    def __init__(self,MNI_Root):
+        self.MNI_Root=MNI_Root
+        self.MNI_Template=self.LoadMNIimage()
+        super().__init__( self.MNI_Template,"MNI")
+    def LoadMNIimage(self):
+        MNI_Template=self.LoadTemplateImageFileMNI()
+        return MNI_Template
+    def LoadTemplateImageFileMNI(self):
+        MNI_Template = sitk.ReadImage(self.MNI_Root)
+        MNI_Template = sitk.DICOMOrient(MNI_Template, "LAI")
+        MNI_Template = sitk.Cast(MNI_Template, sitk.sitkFloat32) 
+        MNI_Template.SetDirection([-1,0,0, 0,-1,0, 0,0,-1])
+        return MNI_Template
+    def PrintINfO(self):
+        print("Dimension:", self.MNI_Template.GetDimension())
+        print("Size:", self.MNI_Template.GetSize())
+        print("Spacing:", self.MNI_Template.GetSpacing())
+        print("Origin:", self.MNI_Template.GetOrigin())
+        print("Direction:", self.MNI_Template.GetDirection())
+    def Load_png(self):
+        img = plt.imread(self.MNI_Root)
+        return img
+class Image2D(ImageProcessor):
+    def __init__(self,image,name):
+        super().__init__(self)
+        self.image=image
+        self.name=name
+    def GetSize(self):
+        self.image.ConvertToNumpy()
+        print(f"{self.name} shape:",  self.image.shape)
+    def GetMinMax(self):
+        image = self.ConvertToNumpy().flatten()
+        print(f"{self.name} min:", image.min(), f"{self.name} max:", image.max())
+    def MinMaxNormalize(self):
+        image=self.ConvertToNumpy()
+        image = image.astype(np.float32)
+
+        min_val = np.min(image)
+        max_val = np.max(image)
+
+        normalized = (image- min_val) / (max_val - min_val + 1e-8)
+
+        return normalized
+    def GaussianNormalize(self):
+        mage = sitk.RescaleIntensity(self.image, 0, 1)
+        normalized = sitk.DiscreteGaussian(self.image, variance=1.0)
+        # image=self.ConvertToNumpy()
+        # image = image.astype(np.float32)
+
+        # mean = np.mean(image)
+        # std = np.std(image)
+        # print(f"{self.name} mean:", image.mean(), f"{self.name} std:", image.std())
+        # normalized = (image - mean) / (std + 1e-8)
+        return normalized
+    def ConvertToNumpy(self):
+        return super().ConvertToNumpy() 
 class PairImage2D():
     def __init__(self,mri_img, pet_img,index):
         self.mri=Image2D(mri_img,"MRI")
@@ -911,16 +1049,18 @@ class PairImage2D():
         plt.figure(figsize=(10,5))
 
         plt.subplot(1,2,1)
-        plt.imshow(self.mriNumpy, cmap="gray" )
+        plt.imshow(self.mriNumpy, cmap="gray" ,  vmin=0,        vmax=1)
         plt.title(f"MRI")
         plt.axis("off")
-
+        
         plt.subplot(1,2,2)
-        plt.imshow(self.petNumpy, cmap="gray" )
+        plt.imshow(self.petNumpy, cmap="gray"  , vmin=0,        vmax=1)
         plt.title(f"PET")
         plt.axis("off")
 
         plt.suptitle(f"Plot 2D Pairs Subject({self.index+1})")
+
+        plt.figure(figsize=(10, 5))
         plt.show()
     def PlotHist(self):
 
@@ -987,21 +1127,7 @@ class PairImage2D():
 
         plt.suptitle(f"Subject {self.index+1}")
         plt.tight_layout()
-        plt.show()
-        #left_idx = max(0, max_bin_idx - 4)
-        #right_idx = min(len(bins)-1, max_bin_idx + 5)
-        #bin_min = bins[left_idx]
-        #bin_max = bins[right_idx]
-        #mask = (Image >= bin_min) & (Image < bin_max)
-        #Image[mask] = 1
-        #arr = sitk.GetArrayFromImage(Image).copy()
-
-        #kernel = np.ones((2,2))
-
-        #count = convolve(arr.astype(np.int32), kernel, mode='constant')
-
-        #filtered = (count > 4).astype(np.uint8)
-        #return Image             
+        plt.show()          
     def MinMaxNormPairs(self) :
         self.mriNumpy = self.mri.MinMaxNormalize()
         self.petNumpy = self.pet.MinMaxNormalize()
@@ -1015,113 +1141,83 @@ class PairImage2D():
     def GetPairsSize(self):
         self.mri.GetSize()
         self.pet.GetSize()
-class Image2D(ImageProcessor):
-    def __init__(self,image,name):
-        super().__init__(self)
-        self.image=image
-        self.name=name
-    def GetSize(self):
-        self.image.ConvertToNumpy()
-        print(f"{self.name} shape:",  self.image.shape)
-    def GetMinMax(self):
-        image = self.ConvertToNumpy().flatten()
-        print(f"{self.name} min:", image.min(), f"{self.name} max:", image.max())
-    def MinMaxNormalize(self):
-        self.image = self.image.astype(np.float32)
+    def MaxBinSetOne(self):
+        self.MaxBinSet(1)
+    def MaxBinSetZero(self):
+        self.MaxBinSet(0)
+    def MaxBinSet(self,setValue):
+        self.mriNumpy= self.CalculateMaxBinFromHistogram(self.mri,setValue)
+        self.petNumpy= self.CalculateMaxBinFromHistogram(self.pet,setValue)
+    def CalculateMaxBinFromHistogram(self, image, setValue):
 
-        min_val = np.min(self.image)
-        max_val = np.max(self.image)
+        threshold = 400
+        # Convert input to NumPy
+        if isinstance(image, Image2D):
+            image = image.ConvertToNumpy()
 
-        normalized = (self.image - min_val) / (max_val - min_val + 1e-8)
+        elif isinstance(image, sitk.Image):
+            image = sitk.GetArrayFromImage(image)
 
-        return normalized
-    def GaussianNormalize(self):
-        self.image = self.image.astype(np.float32)
+        else:
+            image = np.asarray(image)
 
-        mean = np.mean(self.image)
-        std = np.std(self.image)
-        print("mean",mean)
-        print("std",std)
-        normalized = (self.image - mean) / (std + 1e-8)
+        # Make sure numeric
+        image = np.asarray(image, dtype=np.float32)
+        image[image < 0.005] = setValue
+        # Remove NaN / Inf for histogram calculation
+        finite_mask = np.isfinite(image)
+        data = image[finite_mask]
 
-        return normalized
-    def ConvertToNumpy(self):
-        return super().ConvertToNumpy() 
-class Image3D(ImageProcessor):
-    def __init__(self,image,name):
-        super().__init__(self)
-        self.image=image
-        self.name=name
-        self.numpyImage=self.ConvertToNumpy()
-    def Plot3DViews(self,subject="",subjectId="",pair="",path="",save=False):
+        if data.size == 0:
+            return image.copy()
+
+        # Histogram
+        hist, bin_edges = np.histogram(data, bins=256)
+
+        # Find ALL bins with count > 400
+        valid_bins = np.where(hist > threshold)[0]
+
+        if len(valid_bins) == 0:
+            print("No bins have count >", threshold)
+            return image.copy()
+
+        # print("Valid bins:", valid_bins)
+        # print("Number of valid bins:", len(valid_bins))
+
+        # Create result
+        result = image.copy()
        
-        z, y, x = self.numpyImage.shape
-        # print(self.numpyImage.shape)
-        plt.figure(figsize=(12,4))
+        # Mask for pixels belonging to valid bins
+        valid_pixel_mask = np.zeros(image.shape, dtype=bool)
 
-        plt.subplot(1,3,1)
-        plt.imshow(self.numpyImage[z//2], cmap='gray')
-        plt.title("Axial")
+        for bin_index in valid_bins:
 
-        plt.subplot(1,3,2)
-        plt.imshow(self.numpyImage[:, y//2, :], cmap='gray')
-        plt.title("Coronal")
+            lower = bin_edges[bin_index]
+            upper = bin_edges[bin_index + 1]
 
-        plt.subplot(1,3,3)
-        plt.imshow(self.numpyImage[:, :, x//2], cmap='gray')
-        plt.title("Sagittal")
+            # Last bin needs <=
+            if bin_index == len(hist) - 1:
+                bin_mask = (
+                    (image >= lower) &
+                    (image <= upper)
+                )
+            else:
+                bin_mask = (
+                    (image >= lower) &
+                    (image < upper)
+                )
 
-        plt.suptitle(f"Subject({subject}):{subjectId}, Pair({pair})")  
-        save_path = os.path.join(path,rf"architecture_batch_comparison.png")
-        if save:
-            plt.savefig(save_path,dpi=300,bbox_inches="tight")
-        plt.show()
+            valid_pixel_mask |= bin_mask
 
-    def GetMidSlice(self):
-        midIDNumber = self.numpyImage.shape[0] // 2
-        slice = self.numpyImage[midIDNumber]
-        return slice, midIDNumber   
-    def GetSliceId(self,sliceId):
-        if sliceId < 0 or sliceId >= self.numpyImage.shape[0]:
-            raise ValueError("sliceId out of range")
-        return self.numpyImage[sliceId],sliceId
-    def PlotMiddleSlice(self, title=""):
-        print("ITK size:", self.image.GetSize())
+        # Set ALL pixels from valid bins to 1
+        if setValue == 1:
+            result[valid_pixel_mask] = 1
 
-        arr = self.ConvertToNumpy(self.image)
-        arr = np.transpose(arr, (1, 2, 0))
-        mid_slice = arr[arr.shape[0] // 2]
-        
-        print(arr.shape)
-        plt.imshow(mid_slice, cmap="gray")
-        plt.title(title)
-        plt.axis("off")
-        plt.show()
-    def ConvertToNumpy(self):
-        return super().ConvertToNumpy()          
-class MNI(Image3D):
-    def __init__(self,MNI_Root):
-        self.MNI_Root=MNI_Root
-        self.MNI_Template=self.LoadMNIimage()
-        super().__init__( self.MNI_Template,"MNI")
-    def LoadMNIimage(self):
-        MNI_Template=self.LoadTemplateImageFileMNI()
-        return MNI_Template
-    def LoadTemplateImageFileMNI(self):
-        MNI_Template = sitk.ReadImage(self.MNI_Root)
-        MNI_Template = sitk.DICOMOrient(MNI_Template, "LAI")
-        MNI_Template = sitk.Cast(MNI_Template, sitk.sitkFloat32) 
-        MNI_Template.SetDirection([-1,0,0, 0,-1,0, 0,0,-1])
-        return MNI_Template
-    def PrintINfO(self):
-        print("Dimension:", self.MNI_Template.GetDimension())
-        print("Size:", self.MNI_Template.GetSize())
-        print("Spacing:", self.MNI_Template.GetSpacing())
-        print("Origin:", self.MNI_Template.GetOrigin())
-        print("Direction:", self.MNI_Template.GetDirection())
-    def Load_png(self):
-        img = plt.imread(self.MNI_Root)
-        return img
+        else:
+            result[valid_pixel_mask] = 0
+
+        # Keep NaN/Inf unchanged or choose another behavior
+        return result
 
 
 
