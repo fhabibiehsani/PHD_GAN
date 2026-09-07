@@ -1,11 +1,11 @@
 import os
-from PIL import Image
 import cv2
 import subprocess
 import numpy as np
 import nibabel as nib
 import SimpleITK as sitk
 import matplotlib.pyplot as plt
+from PIL import Image
 from pathlib import Path
 from collections import defaultdict
 from scipy.ndimage import convolve
@@ -544,30 +544,31 @@ class DatasetLoader():
         pair_counter = defaultdict(int)
         Info = []
         for (mri_folder, mri_fmt), (pet_folder, pet_fmt) in items:
+            if pet_fmt==".dicom":
 
-            mriImageLoader=ImageLoader(mri_folder, mri_fmt, "mri")
-            petImageLoader=ImageLoader(pet_folder, pet_fmt, "pet")
+                mriImageLoader=ImageLoader(mri_folder, mri_fmt, "mri")
+                petImageLoader=ImageLoader(pet_folder, pet_fmt, "pet")
 
-            mri, mri_frames = mriImageLoader.LoadImages()
-            pet, pet_frames = petImageLoader.LoadImages()
+                mri, mri_frames = mriImageLoader.LoadImages()
+                pet, pet_frames = petImageLoader.LoadImages()
 
-            dataset.append((mri, pet))
-            Info.append(self._FindSubjectAndPairs(pair_counter,mri_folder))
+                dataset.append((mri, pet))
+                Info.append(self._FindSubjectAndPairs(pair_counter,mri_folder))
         return (dataset,Info)
     def _FindSubjectAndPairs(self,pair_counter,mri_folder):
-        # parts = Path(mri_folder).parts
-        # adni_index = parts.index("ADNI")
+        parts = Path(mri_folder).parts
+        adni_index = parts.index("ADNI")
 
-        # subject = parts[adni_index + 1]
-        # pair = parts[adni_index + 2]
+        subject = parts[adni_index + 1]
+        pair = parts[adni_index + 2]
 
-        # # Start from 1 for each subject
-        # pair_counter[subject] += 1
-        # pair_number = pair_counter[subject]
+        # Start from 1 for each subject
+        pair_counter[subject] += 1
+        pair_number = pair_counter[subject]
 
-        # # print(subject, pair_number)
-        # return (subject, pair_number)
-        return ("",1)
+        # print(subject, pair_number)
+        return (subject, pair_number)
+        # return ("",1)
  
     def Load_nii_Dataset(self,input_nii):
 
